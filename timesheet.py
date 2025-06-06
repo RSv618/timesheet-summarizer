@@ -1303,7 +1303,7 @@ def find_writable_filename(output_path: str) -> Path:
 
         counter: int = 1
         while True:
-            # Create a new filename like 'formatted_timesheet (1).xlsx'
+            # Create a new filename like 'timesheet_summary (1).xlsx'
             new_path: Path = path.with_name(f'{path.stem} ({counter}){path.suffix}')
             try:
                 with open(new_path, 'a'):
@@ -1324,7 +1324,7 @@ def find_writable_filename(output_path: str) -> Path:
 def create_sheet(df: pd.DataFrame,
                  comments: dict[tuple[str, str], str],
                  flags: list[tuple[str, str]],
-                 output_filename: str = 'formatted_timesheet.xlsx'):
+                 output_filename: str = 'timesheet_summary.xlsx') -> Path | None:
     """
     Creates a formatted Excel sheet from a summary DataFrame.
 
@@ -1348,7 +1348,7 @@ def create_sheet(df: pd.DataFrame,
         final_output_path: Path = find_writable_filename(output_filename)
     except Exception as e:
         print(f'Could not secure a writable output file. Aborting. Error: {e}')
-        return  # Exit the function if no writable file can be found
+        return  None
 
     # This makes the code easier to read and maintain.
     header_fill = PatternFill(start_color='3A3838', end_color='3A3838', fill_type='solid')
@@ -1443,6 +1443,8 @@ def create_sheet(df: pd.DataFrame,
         # 8. Freeze Panes
         worksheet.freeze_panes = 'C2' # Using the cell address directly is common and clear
 
+    return final_output_path
+
 def process_csv(df: pd.DataFrame,
                 buffer: timedelta = timedelta(minutes=15),
                 start_hour: timedelta | None = str_to_delta('07:00 AM'),
@@ -1450,7 +1452,8 @@ def process_csv(df: pd.DataFrame,
                 break_time: dict[str, dict] | None = None,
                 first_in_thresh: timedelta = str_to_delta('10:30 AM'),
                 last_out_thresh: timedelta = str_to_delta('02:30 PM'),
-                round_to: list[timedelta] | None = None):
+                round_to: list[timedelta] | None = None,
+                output_filename: str = 'timesheet_summary.xlsx') -> Path | None:
     """
     Main orchestration function to process a raw timesheet DataFrame.
 
@@ -1466,14 +1469,13 @@ def process_csv(df: pd.DataFrame,
         first_in_thresh: Time threshold to identify a morning punch.
         last_out_thresh: Time threshold to identify an afternoon punch.
         round_to: A list of specific times to round nearby punches to.
+        output_filename: The name of the output Excel file.
     """
     if break_time is None:
-        break_time = {'lunch': {'start': '12:00 PM', 'end': '01:00 PM', 'paid': False},
-                      'dinner': {'start': '06:00 PM', 'end': '06:30 PM', 'paid': True}}
+        break_time = {}
 
     if round_to is None:
-        round_to = ['04:00 PM', '05:00 PM', '06:00 PM']
-        round_to = [str_to_delta(i) for i in round_to]
+        round_to = []
 
     # convert str time to timedelta
     for key, value in break_time.items():
@@ -1536,12 +1538,11 @@ def process_csv(df: pd.DataFrame,
     comments: dict[tuple[str, str], str] = combine_comments(original_timestamps, new_timestamps, flags,
                                                             comment_header, silence=['early_in', 'late_exit'])
     crucial_flags: list[tuple[str, str]] = get_crucial_flags(flags)
-    create_sheet(summary, comments, crucial_flags)
-    return
+    return create_sheet(summary, comments, crucial_flags, output_filename)
 
-def main():
+def run_default():
     # Parameters
-    file_path: Path = Path('Report_TimeLogs (5).csv')
+    file_path: Path = Path('sample.csv')
     buffer: timedelta = timedelta(minutes=15)
     start_hour: timedelta = str_to_delta('07:00 AM')
     end_hour: timedelta = str_to_delta('10:00 PM')
@@ -1551,10 +1552,12 @@ def main():
                   'dinner': {'start': '06:00 PM', 'end': '06:30 PM', 'paid': True}}
     round_to = ['04:00 PM', '05:00 PM', '06:00 PM']
     round_to = [str_to_delta(i) for i in round_to]
+    output_filename: str = 'timesheet_summary.xlsx'
 
     # Process
-    process_csv(pd.read_csv(file_path), buffer, start_hour, end_hour, break_time, first_in_thresh, last_out_thresh, round_to)
+    process_csv(pd.read_csv(file_path), buffer, start_hour, end_hour, break_time, first_in_thresh,
+                last_out_thresh, round_to, output_filename)
     return
 
 if __name__ == '__main__':
-    main()
+    run_default()
