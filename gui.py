@@ -15,7 +15,6 @@ from datetime import datetime, timedelta
 try:
     from timesheet import process_csv, str_to_delta
 except ImportError:
-    # FIX 1 & 2: Define dummy functions to satisfy the linter.
     def process_csv(*args, **kwargs):
         """Dummy function for when import fails."""
         pass
@@ -66,7 +65,7 @@ class TimesheetApp(QWidget):
         restore_btn = QPushButton("Restore Default Settings")
         restore_btn.setToolTip("Resets all settings across all tabs to their original values.")
         # noinspection PyUnresolvedReferences
-        restore_btn.clicked.connect(self._restore_default_settings)  # FIX 3
+        restore_btn.clicked.connect(self._restore_default_settings)
         layout.addStretch()
         layout.addWidget(restore_btn, alignment=Qt.AlignmentFlag.AlignRight)
         return settings_tab
@@ -108,10 +107,10 @@ class TimesheetApp(QWidget):
         self.end_hour_check.setChecked(True)
         # noinspection PyUnresolvedReferences
         self.start_hour_check.stateChanged.connect(
-            lambda state: self.start_hour_combo.setEnabled(state == Qt.CheckState.Checked.value))  # FIX 3
+            lambda state: self.start_hour_combo.setEnabled(state == Qt.CheckState.Checked.value))
         # noinspection PyUnresolvedReferences
         self.end_hour_check.stateChanged.connect(
-            lambda state: self.end_hour_combo.setEnabled(state == Qt.CheckState.Checked.value))  # FIX 3
+            lambda state: self.end_hour_combo.setEnabled(state == Qt.CheckState.Checked.value))
         self.start_hour_combo.setEnabled(self.start_hour_check.isChecked())
         self.end_hour_combo.setEnabled(self.end_hour_check.isChecked())
         buffer_label = QLabel("Buffer Period (minutes):")
@@ -152,7 +151,7 @@ class TimesheetApp(QWidget):
         layout.addWidget(self.breaks_table)
         add_btn = QPushButton("Add Break")
         # noinspection PyUnresolvedReferences
-        add_btn.clicked.connect(lambda: self._add_break_row())  # FIX 3
+        add_btn.clicked.connect(lambda: self._add_break_row())
         layout.addWidget(add_btn, alignment=Qt.AlignmentFlag.AlignRight)
         return group_box
 
@@ -176,7 +175,7 @@ class TimesheetApp(QWidget):
         self.breaks_table.setCellWidget(row_position, 3, cell_widget)
         remove_btn = QPushButton("Remove")
         # noinspection PyUnresolvedReferences
-        remove_btn.clicked.connect(self._remove_break_row_clicked)  # FIX 3
+        remove_btn.clicked.connect(self._remove_break_row_clicked)
         self.breaks_table.setCellWidget(row_position, 4, remove_btn)
 
     def _remove_break_row_clicked(self):
@@ -202,7 +201,7 @@ class TimesheetApp(QWidget):
         self.input_path_edit.setPlaceholderText("Click 'Browse' to select a CSV file...")
         browse_btn = QPushButton("Browse...")
         # noinspection PyUnresolvedReferences
-        browse_btn.clicked.connect(self._select_input_file)  # FIX 3
+        browse_btn.clicked.connect(self._select_input_file)
         input_layout.addWidget(input_label)
         input_layout.addWidget(self.input_path_edit)
         input_layout.addWidget(browse_btn)
@@ -243,7 +242,7 @@ class TimesheetApp(QWidget):
         layout.addWidget(self.rounding_table)
         add_btn = QPushButton("Add Time")
         # noinspection PyUnresolvedReferences
-        add_btn.clicked.connect(lambda: self._add_rounding_row())  # FIX 3
+        add_btn.clicked.connect(lambda: self._add_rounding_row())
         layout.addWidget(add_btn, alignment=Qt.AlignmentFlag.AlignRight)
         group_box.setLayout(layout)
         return group_box
@@ -259,7 +258,7 @@ class TimesheetApp(QWidget):
             QPushButton:disabled { background-color: #cccccc; color: #666666; }
         """)
         # noinspection PyUnresolvedReferences
-        self.process_btn.clicked.connect(self._run_processing)  # FIX 3
+        self.process_btn.clicked.connect(self._run_processing)
         return self.process_btn
 
     def _validate_parameters(self):
@@ -289,7 +288,7 @@ class TimesheetApp(QWidget):
                 errors.append(f"Duplicate break name found: '{name}'. Names must be unique.")
             break_names.add(name)
 
-            # FIX 4: Safely get widget and its text
+            # Safely get widget and its text
             start_combo = self.breaks_table.cellWidget(row, 1)
             end_combo = self.breaks_table.cellWidget(row, 2)
             if isinstance(start_combo, QComboBox) and isinstance(end_combo, QComboBox):
@@ -319,7 +318,7 @@ class TimesheetApp(QWidget):
         if not input_file:
             error_msg = "Please select an input CSV file first."
             QMessageBox.critical(self, "Error", error_msg)
-            self.log(f"Error: {error_msg}")  # FIX: Log this error
+            self.log(f"Error: {error_msg}")
             return
 
         validation_errors = self._validate_parameters()
@@ -327,7 +326,7 @@ class TimesheetApp(QWidget):
             error_msg = "Please fix the following configuration errors:\n\n" + "\n".join(
                 f"• {e}" for e in validation_errors)
             QMessageBox.critical(self, "Invalid Settings", error_msg)
-            self.log("Validation failed. Please check settings.")  # FIX: Log this error
+            self.log("Validation failed. Please check settings.")
             return
 
         output_file, _ = QFileDialog.getSaveFileName(self, "Save Summary As", "", "Excel Files (*.xlsx)")
@@ -364,7 +363,7 @@ class TimesheetApp(QWidget):
         except Exception as e:
             error_msg = f"Could not gather parameters: {e}"
             QMessageBox.critical(self, "Parameter Error", error_msg)
-            self.log(f"Error: {error_msg}")  # FIX: Log this error
+            self.log(f"Error: {error_msg}")
             return
 
         self.process_btn.setEnabled(False)
@@ -384,21 +383,21 @@ class TimesheetApp(QWidget):
                 success_msg = f"Processing complete! Summary saved to:\n{final_filename}"
                 QMessageBox.information(self, "Success", success_msg)
                 # This is the line that was missing. Replace newlines for a cleaner log.
-                self.log(success_msg.replace('\n', ' '))  # FIX: Restore success log
+                self.log(success_msg.replace('\n', ' '))  # Restore success log
             else:
                 error_msg = "Could not write to the output file. Please ensure it's not open elsewhere."
                 QMessageBox.critical(self, "File Error", error_msg)
-                self.log(f"Error: {error_msg}")  # FIX: Log this error
+                self.log(f"Error: {error_msg}")  # Log this error
 
         except FileNotFoundError:
             error_msg = f"Input file not found:\n{input_file}"
             QMessageBox.critical(self, "Error", error_msg)
-            self.log(error_msg.replace('\n', ' '))  # FIX: Log this error
+            self.log(error_msg.replace('\n', ' '))  # Log this error
 
         except Exception as e:
             error_msg = f"An unexpected error occurred during processing:\n\n{type(e).__name__}: {e}"
             QMessageBox.critical(self, "Processing Error", error_msg)
-            self.log(f"FATAL ERROR: {error_msg.replace('\n', ' ')}")  # FIX: Log this error
+            self.log(f"FATAL ERROR: {error_msg.replace('\n', ' ')}")  # Log this error
 
         finally:
             self.process_btn.setEnabled(True)
@@ -427,7 +426,7 @@ class TimesheetApp(QWidget):
         self.rounding_table.setCellWidget(row_position, 0, time_combo)
         remove_btn = QPushButton("Remove")
         # noinspection PyUnresolvedReferences
-        remove_btn.clicked.connect(self._remove_rounding_row_clicked)  # FIX 3
+        remove_btn.clicked.connect(self._remove_rounding_row_clicked)
         self.rounding_table.setCellWidget(row_position, 1, remove_btn)
 
     def _remove_rounding_row_clicked(self):
