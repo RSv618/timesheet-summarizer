@@ -4,6 +4,7 @@ from datetime import datetime, date, timedelta
 from openpyxl.styles import PatternFill, Font, Border, Side, Alignment
 from openpyxl.comments import Comment
 from openpyxl.utils import get_column_letter
+from platform import system
 
 def process_headers(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -95,45 +96,123 @@ def process_headers(df: pd.DataFrame) -> pd.DataFrame:
     df = df.rename(columns={id_col: 'ID', name_col: 'NAME', date_col: 'DATE', time_col: 'TIME', in_out_col: 'TYPE'})
     return df[['ID', 'NAME', 'DATE', 'TIME', 'TYPE']]
 
-
-def parse_dates(series: pd.Series, formats: list[str]) -> pd.Series:
+def parse_dates(series: pd.Series, formats: list[str], day_first: bool = True) -> pd.Series:
     """
-    Efficiently parses a Series of date/time strings using a list of possible formats.
+    Parses date strings using the specified hybrid strategy.
 
-    This function iterates through a list of specified formats, attempting to parse
-    any entries that have not yet been successfully converted. This is more efficient
-    than trying all formats for every entry. After trying all specified formats,
-    it makes a final attempt on any remaining strings using pandas' default
-    parser with `dayfirst=True`.
+    1.  Fast Path: It iterates through `formats`. For each format, it
+        attempts to parse the *entire* series. If successful, it returns
+        the result immediately. This is highly efficient for uniform data.
+
+    2.  Fallback Path: If no single format can parse the entire series, it
+        falls back to using pandas' flexible but slower mixed-format parser.
 
     Args:
-        series: A pandas Series containing date/time strings to parse.
-        formats: A list of format codes (e.g., '%Y-%m-%d %H:%M:%S') to try.
+        series: The pandas Series of date strings.
+        formats: A list of format strings to attempt for the fast path.
+        day_first: A hint for the fallback parser for ambiguous dates (e.g., '01/02/2023').
+                  Set to True for European (DMY), False for US (MDY).
 
     Returns:
-        A pandas Series of datetime64[ns] objects. Unparseable entries will be NaT.
+        A pandas Series of datetime objects.
     """
-    parsed_dates = pd.Series([pd.NaT] * len(series), index=series.index, dtype='datetime64[ns]')
-
+    # Try to find one format that works for the whole series.
     for fmt in formats:
-        # Only attempt on entries still NaT:
-        subset_idx: pd.Series = parsed_dates.isna()
-        current_parsed: pd.Series = pd.to_datetime(series[subset_idx], format=fmt, errors='coerce')
+        try:
+            # We use errors='raise'. If even one date fails, it will raise a
+            # ValueError, and we'll move to the next format.
+            parsed_series = pd.to_datetime(series, format=fmt, errors='raise')
+            return parsed_series
+        except (ValueError, TypeError):
+            # This format didn't work for one or more dates.
+            continue
 
-        # Fill in any successes
-        parsed_dates.update(current_parsed.dropna())
+    # --- FALLBACK PATH ---
+    # If the loop finishes, no single format worked for the whole series.
+    # Use format='mixed' to let pandas infer the format for each row individually.
+    return pd.to_datetime(series, dayfirst=day_first, errors='coerce')
 
-        # If every entry got parsed, stop
-        if parsed_dates.notna().all():
-            break
+def generate_date_formats() -> list[str]:
+    """
+    Generates a list of date format strings in a specific, ordered sequence:
+    1. ISO style (YYYY-MM-DD)
+    2. European style (DD-MM-YYYY)
+    3. US style (MM-DD-YYYY)
 
-    # Once we've exhausted all explicit “formats”, parse any remaining with dayfirst=True
-    if parsed_dates.isna().any():
-        remaining: pd.Series = series[parsed_dates.isna()]
-        parsed_dates.loc[parsed_dates.isna()] = pd.to_datetime(remaining, dayfirst=True, errors='coerce')
+    Each style includes variations for:
+    - Padded and non-padded day, month, and hour.
+    - '/' and '-' separators.
+    - Time with and without seconds.
+    - 24-hour and 12-hour (AM/PM) clock.
 
-    return parsed_dates
+    The order is preserved to ensure predictable parsing for ambiguous dates.
+    """
+    # 1. Define OS-specific modifiers for non-padded numbers
+    # For day/month
+    d_mod = '%-d' if system() != 'Windows' else '%#d'
+    m_mod = '%-m' if system() != 'Windows' else '%#m'
+    # For hour
+    H_mod = '%-H' if system() != 'Windows' else '%#H'  # 24-hr
+    I_mod = '%-I' if system() != 'Windows' else '%#I'  # 12-hr
 
+    # 2. Define the building blocks for the format strings
+    day_parts = ['%d', d_mod]
+    month_parts = ['%m', m_mod]
+    year_parts = ['%Y', '%y']
+    separators = ['/', '-']
+
+    # Comprehensive list of time formats to append
+    time_formats = [
+        # With seconds
+        f'%H:%M:%S',  # 24h padded
+        f'{H_mod}:%M:%S',  # 24h non-padded
+        f'%I:%M:%S %p',  # 12h padded
+        f'{I_mod}:%M:%S %p',  # 12h non-padded
+        # Without seconds
+        f'%H:%M',  # 24h padded
+        f'{H_mod}:%M',  # 24h non-padded
+        f'%I:%M %p',  # 12h padded
+        f'{I_mod}:%M %p',  # 12h non-padded
+    ]
+
+    final_formats = []
+
+    # 3. Generate formats in the specified order
+    # --- ISO Formats (Y-M-D) ---
+    iso_formats = []
+    for sep in separators:
+        for m in month_parts:
+            for d in day_parts:
+                for y in year_parts:
+                    date_base = f'{y}{sep}{m}{sep}{d}'
+                    for time in time_formats:
+                        iso_formats.append(f'{date_base} {time}')
+    final_formats.extend(iso_formats)
+
+    # --- European Formats (D-M-Y) ---
+    eur_formats = []
+    for sep in separators:
+        for d in day_parts:
+            for m in month_parts:
+                for y in year_parts:
+                    date_base = f'{d}{sep}{m}{sep}{y}'
+                    for time in time_formats:
+                        eur_formats.append(f'{date_base} {time}')
+    final_formats.extend(eur_formats)
+
+    # --- US Formats (M-D-Y) ---
+    us_formats = []
+    for sep in separators:
+        for m in month_parts:
+            for d in day_parts:
+                for y in year_parts:
+                    date_base = f'{m}{sep}{d}{sep}{y}'
+                    for time in time_formats:
+                        us_formats.append(f'{date_base} {time}')
+    final_formats.extend(us_formats)
+
+    # 4. Remove duplicates while preserving order
+    return list(dict.fromkeys(final_formats))
 
 def add_datetime(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -156,45 +235,7 @@ def add_datetime(df: pd.DataFrame) -> pd.DataFrame:
     datetime_str_series: pd.Series = df['DATE'] + ' ' + df['TIME']
 
     # Parse Datetime
-    formats: list[str] = [
-        # 1. ISO-hyphen, zero-padded 24 h with seconds
-        '%Y-%m-%d %H:%M:%S',  # e.g. '2025-05-21 06:39:40'
-
-        # 2. ISO-hyphen, zero-padded 12 h with seconds + AM/PM
-        '%Y-%m-%d %I:%M:%S %p',  # e.g. '2025-05-21 06:39:40 AM' or 'PM'
-
-        # 3. ISO-hyphen, zero-padded 24 h **without** seconds (just in case “HH:MM” appears)
-        '%Y-%m-%d %H:%M',  # e.g. '2025-05-21 06:39'
-
-        # 4. European dash (“DD-MM-YYYY HH:MM:SS”), zero-padded 24 h
-        '%d-%m-%Y %H:%M:%S',  # e.g. '21-05-2025 06:39:40'
-        '%d-%m-%Y %I:%M:%S %p',  # e.g. '21-05-2025 06:39:40 PM'
-        '%d-%m-%Y %H:%M',  # e.g. '21-05-2025 06:39'
-
-        # 5. ISO with slashes, zero-padded 24 h
-        '%Y/%m/%d %H:%M:%S',  # e.g. '2025/05/21 06:39:40'
-        '%Y/%m/%d %I:%M:%S %p',  # e.g. '2025/05/21 06:39:40 PM'
-        '%Y/%m/%d %H:%M',  # e.g. '2025/05/21 06:39'
-
-        # 6. Compact “YYYYMMDD HH:MM:SS”
-        '%Y%m%d %H:%M:%S',  # e.g. '20250521 06:39:40'
-
-        # 7. Slash day-first, zero-padded 24 h
-        '%d/%m/%Y %H:%M:%S',  # e.g. '21/05/2025 06:39:40'
-        '%d/%m/%Y %I:%M:%S %p',  # e.g. '21/05/2025 06:39:40 PM'
-        '%d/%m/%Y %H:%M',  # e.g. '21/05/2025 06:39'
-
-        # 8. Slash day-first, single-digit hour (Unix; on Windows replace %-H with %#H)
-        '%d/%m/%Y %-H:%M:%S',  # e.g. '21/05/2025 6:39:40'
-        '%d/%m/%Y %-I:%M:%S %p',  # e.g. '21/05/2025 6:39:40 PM'
-        '%d/%m/%Y %-H:%M',  # e.g. '21/05/2025 6:39'
-
-        # 9. (Optional) Slash US-style, zero-padded 24 h
-        '%m/%d/%Y %H:%M:%S',  # e.g. '05/21/2025 06:39:40'
-        '%m/%d/%Y %I:%M:%S %p',  # e.g. '05/21/2025 06:39:40 PM'
-        '%m/%d/%Y %H:%M',  # e.g. '05/21/2025 06:39'
-    ]
-    df['DATETIME'] = parse_dates(datetime_str_series, formats)
+    df['DATETIME'] = parse_dates(datetime_str_series, generate_date_formats(), day_first=True)
     df['DATE'] = df['DATETIME'].dt.strftime('%b %d')
     df['TIME'] = df['DATETIME'].dt.time
     return df
