@@ -11,7 +11,6 @@ def preprocess_sheet(df_raw: pd.DataFrame) -> pd.DataFrame | None:
     Takes a raw DataFrame (from one sheet or file) and performs initial processing.
     1. Checks for and standardizes headers.
     2. Parses date/time columns.
-    3. Removes rows with unparseable dates.
     Returns a processed DataFrame or None if headers are invalid.
     """
     try:
@@ -30,7 +29,7 @@ def preprocess_sheet(df_raw: pd.DataFrame) -> pd.DataFrame | None:
 
     # Identify and filter out rows where parsing failed
     if df['DATETIME'].isnull().any():
-        raise TypeError(f'Found and removed row(s) with unparseable date/time values from a sheet.')
+        raise TypeError(f'Found row(s) with unparseable date/time values from a sheet.')
 
     # If all rows were invalid, return an empty frame
     if df.empty:
