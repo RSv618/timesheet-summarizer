@@ -1,4 +1,3 @@
-# gui.py
 import sys
 import pandas as pd
 from PyQt6.QtWidgets import (
@@ -13,9 +12,9 @@ from pathlib import Path
 from datetime import datetime, timedelta
 
 try:
-    from timesheet import process_csv, str_to_delta
+    from timesheet import process_timesheet, str_to_delta
 except ImportError:
-    def process_csv(*args, **kwargs):
+    def process_timesheet(*args, **kwargs):
         """Dummy function for when import fails."""
         pass
 
@@ -198,7 +197,7 @@ class TimesheetApp(QWidget):
         input_layout = QHBoxLayout()
         input_label = QLabel("Select Input File:")
         self.input_path_edit = QLineEdit()
-        self.input_path_edit.setPlaceholderText("Click 'Browse' to select a CSV file...")
+        self.input_path_edit.setPlaceholderText("Click 'Browse' to select a CSV or XLSX file...")
         browse_btn = QPushButton("Browse...")
         # noinspection PyUnresolvedReferences
         browse_btn.clicked.connect(self._select_input_file)
@@ -316,7 +315,7 @@ class TimesheetApp(QWidget):
         self.log_edit.clear()
         input_file = self.input_path_edit.text()
         if not input_file:
-            error_msg = "Please select an input CSV file first."
+            error_msg = "Please select an input file first."
             QMessageBox.critical(self, "Error", error_msg)
             self.log(f"Error: {error_msg}")
             return
@@ -371,8 +370,15 @@ class TimesheetApp(QWidget):
         QApplication.processEvents()
 
         try:
-            df_full = pd.read_csv(input_file)
-            final_filename = process_csv(
+            from timesheet import read_input_file
+            self.log("Reading and validating input file...")
+            QApplication.processEvents()
+            df_full, logs = read_input_file(input_file)
+            for msg in logs:
+                self.log(msg)
+
+            self.log("Input file loaded successfully. Starting main process...")
+            final_filename = process_timesheet(
                 df=df_full, buffer=buffer, start_hour=start_hour, end_hour=end_hour,
                 break_time=break_time, first_in_thresh=first_in_thresh,
                 last_out_thresh=last_out_thresh, round_to=round_to_delta,
@@ -382,22 +388,21 @@ class TimesheetApp(QWidget):
             if final_filename:
                 success_msg = f"Processing complete! Summary saved to:\n{final_filename}"
                 QMessageBox.information(self, "Success", success_msg)
-                # This is the line that was missing. Replace newlines for a cleaner log.
-                self.log(success_msg.replace('\n', ' '))  # Restore success log
+                self.log(success_msg.replace('\n', ' '))
             else:
                 error_msg = "Could not write to the output file. Please ensure it's not open elsewhere."
                 QMessageBox.critical(self, "File Error", error_msg)
-                self.log(f"Error: {error_msg}")  # Log this error
+                self.log(f"Error: {error_msg}")
 
-        except FileNotFoundError:
-            error_msg = f"Input file not found:\n{input_file}"
-            QMessageBox.critical(self, "Error", error_msg)
-            self.log(error_msg.replace('\n', ' '))  # Log this error
+        except (FileNotFoundError, ValueError) as e:
+            error_msg = f"Failed to read or process the input file:\n\n{e}"
+            QMessageBox.critical(self, "File or Data Error", error_msg)
+            self.log(f"ERROR: {str(e).replace('\n', ' ')}")
 
         except Exception as e:
             error_msg = f"An unexpected error occurred during processing:\n\n{type(e).__name__}: {e}"
             QMessageBox.critical(self, "Processing Error", error_msg)
-            self.log(f"FATAL ERROR: {error_msg.replace('\n', ' ')}")  # Log this error
+            self.log(f"FATAL ERROR: {error_msg.replace('\n', ' ')}")
 
         finally:
             self.process_btn.setEnabled(True)
@@ -437,14 +442,27 @@ class TimesheetApp(QWidget):
                 self.rounding_table.removeRow(index.row())
 
     def _select_input_file(self):
-        file_path, _ = QFileDialog.getOpenFileName(self, "Select Timesheet CSV", "", "CSV Files (*.csv);;All Files (*)")
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Timesheet File", "",
+            "Timesheet Files (*.csv *.xlsx *.xls);;CSV Files (*.csv);;Excel Files (*.xlsx *.xls);;All Files (*)"
+        )
         if file_path:
             self.input_path_edit.setText(file_path)
             self._update_preview(file_path)
 
     def _update_preview(self, file_path):
         try:
-            df = pd.read_csv(file_path, nrows=100)
+            path = Path(file_path)
+            file_suffix = path.suffix.lower()
+
+            if file_suffix == '.csv':
+                df = pd.read_csv(file_path, nrows=100)
+            elif file_suffix in ['.xlsx', '.xls']:
+                # For preview, just read the first sheet to be fast.
+                df = pd.read_excel(file_path, nrows=100, engine='openpyxl')
+            else:
+                raise ValueError("Unsupported file type for preview.")
+
             self.preview_table.clear()
             self.preview_table.setRowCount(df.shape[0])
             self.preview_table.setColumnCount(df.shape[1])

@@ -6,6 +6,110 @@ from openpyxl.comments import Comment
 from openpyxl.utils import get_column_letter
 from platform import system
 
+def preprocess_sheet(df_raw: pd.DataFrame) -> pd.DataFrame | None:
+    """
+    Takes a raw DataFrame (from one sheet or file) and performs initial processing.
+    1. Checks for and standardizes headers.
+    2. Parses date/time columns.
+    3. Removes rows with unparseable dates.
+    Returns a processed DataFrame or None if headers are invalid.
+    """
+    try:
+        df: pd.DataFrame = process_headers(df_raw.copy())
+    except ValueError:
+        # This will be caught by the caller to log which sheet is skipped
+        raise
+
+    # Force date/time columns to string before processing
+    df['DATE'] = df['DATE'].astype(str).str.strip()
+    df['TIME'] = df['TIME'].astype(str).str.strip()
+    datetime_str_series: pd.Series = df['DATE'] + ' ' + df['TIME']
+
+    # Parse Datetime
+    df['DATETIME'] = parse_dates(datetime_str_series, generate_date_formats(), day_first=True)
+
+    # Identify and filter out rows where parsing failed
+    if df['DATETIME'].isnull().any():
+        raise TypeError(f'Found and removed row(s) with unparseable date/time values from a sheet.')
+
+    # If all rows were invalid, return an empty frame
+    if df.empty:
+        return pd.DataFrame()
+
+    # Re-format DATE and TIME columns for the remaining valid rows
+    df['DATE'] = df['DATETIME'].dt.strftime('%b %d')
+    df['TIME'] = df['DATETIME'].dt.time
+    return df
+
+def read_input_file(file_path: str | Path) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Reads a CSV or XLSX file, combines sheets if necessary, and returns a single DataFrame.
+
+    -   For XLSX files, it reads all sheets. For each sheet, it checks if it
+        contains the required headers. It then combines all sheets that have
+        the required headers into a single DataFrame.
+    -   For CSV files, it reads the file and checks for required headers.
+    -   It returns a list of log messages about which sheets were skipped.
+    -   It raises a ValueError if no valid data (with required headers) is found.
+
+    Args:
+        file_path: The path to the input file (.csv or .xlsx).
+
+    Returns:
+        A tuple containing:
+        - A combined pandas DataFrame ready for processing.
+        - A list of log messages generated during reading.
+
+    Raises:
+        ValueError: If the file format is unsupported or no sheets/file with
+                    valid headers are found.
+    """
+    path: Path = Path(file_path)
+    file_suffix: str = path.suffix.lower()
+    logs: list = []
+
+    if file_suffix == '.csv':
+        df_raw = pd.read_csv(path)
+        try:
+            processed_df = preprocess_sheet(df_raw)
+            if processed_df is None or processed_df.empty:
+                raise ValueError(f'The CSV file {path.name=} has missing headers or no valid data.')
+            logs.append(f'Successfully processed CSV file: {path.name=}')
+            return processed_df, logs
+        except ValueError as e:
+            raise ValueError(f'The CSV file {path.name=} could not be processed. Details: {e}')
+
+    elif file_suffix in ['.xlsx', '.xls']:
+        try:
+            xls_sheets = pd.read_excel(path, sheet_name=None, engine='openpyxl')
+        except Exception as e:
+            raise ValueError(f'Error reading Excel file {path.name=}: {e}')
+
+        processed_dfs = []
+        for sheet_name, sheet_df_raw in xls_sheets.items():
+            if sheet_df_raw.empty:
+                logs.append(f'Skipping empty sheet: {sheet_name=}.')
+                continue
+            try:
+                processed_df = preprocess_sheet(sheet_df_raw)
+                if not processed_df.empty:
+                    processed_dfs.append(processed_df)
+                    logs.append(f'Successfully processed sheet: {sheet_name=}.')
+                else:
+                    logs.append(f'Sheet {sheet_name=} contained no rows with valid data.')
+            except ValueError:
+                logs.append(f'Skipping sheet {sheet_name=} due to missing required headers.')
+                continue
+
+        if not processed_dfs:
+            raise ValueError(f'No sheets with valid headers and data found in Excel file {path.name=}.')
+
+        logs.append(f'Successfully combined {len(processed_dfs)} sheet(s) from {path.name}.')
+        return pd.concat(processed_dfs, ignore_index=True), logs
+
+    else:
+        raise ValueError(f'Unsupported file format: {file_suffix=}. Please use a .csv or .xlsx file.')
+
 def process_headers(df: pd.DataFrame) -> pd.DataFrame:
     """
     Standardizes column headers and selects essential timesheet columns.
@@ -213,32 +317,6 @@ def generate_date_formats() -> list[str]:
 
     # 4. Remove duplicates while preserving order
     return list(dict.fromkeys(final_formats))
-
-def add_datetime(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Combines 'DATE' and 'TIME' columns into a single 'DATETIME' column.
-
-    It first cleans the 'DATE' and 'TIME' columns, then concatenates them.
-    It uses the `parse_dates` function with a comprehensive list of formats
-    to convert the combined string into a datetime object. Finally, it
-    re-formats the original 'DATE' and 'TIME' columns from the new
-    'DATETIME' column.
-
-    Args:
-        df: The DataFrame, which must contain 'DATE' and 'TIME' string columns.
-
-    Returns:
-        The DataFrame with an added 'DATETIME' column and updated 'DATE'/'TIME' columns.
-    """
-    df['DATE'] = df['DATE'].str.strip()
-    df['TIME'] = df['TIME'].str.strip()
-    datetime_str_series: pd.Series = df['DATE'] + ' ' + df['TIME']
-
-    # Parse Datetime
-    df['DATETIME'] = parse_dates(datetime_str_series, generate_date_formats(), day_first=True)
-    df['DATE'] = df['DATETIME'].dt.strftime('%b %d')
-    df['TIME'] = df['DATETIME'].dt.time
-    return df
 
 def create_grid(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -676,7 +754,7 @@ def add_helper_cols(df: pd.DataFrame) -> pd.DataFrame:
     """
     Adds temporary helper columns to the DataFrame for processing.
 
-    - 'VERIFIED': A boolean flag, initialized to False, to track processed punches.
+    - 'VERIFIED': A boolean flag, initialized False, to track processed punches.
     - 'INDEX': A copy of the DataFrame's index for stable referencing.
     - 'TIMEDELTA': The time portion of 'DATETIME' as a timedelta from midnight.
 
@@ -886,7 +964,7 @@ def record_timestamps(df: pd.DataFrame, header: str | None = None) -> dict[tuple
 
     Args:
         df: The DataFrame containing the timestamps.
-        header: An optional header string to prepend to each record (e.g., "Raw Data:").
+        header: An optional header string to prepend to each record (e.g., 'Raw Data:').
 
     Returns:
         A dictionary mapping (ID, DATE) tuples to a formatted string of their timestamps.
@@ -1318,7 +1396,7 @@ def find_writable_filename(output_path: str) -> Path:
     Checks if a file is writable. If not, finds a unique alternative.
 
     If the target file is locked (e.g., open in Excel), it will append a
-    counter to the filename (e.g., "file (1).xlsx") until it finds an
+    counter to the filename (e.g., 'file (1).xlsx') until it finds an
     available path.
 
     Args:
@@ -1486,15 +1564,15 @@ def create_sheet(df: pd.DataFrame,
 
     return final_output_path
 
-def process_csv(df: pd.DataFrame,
-                buffer: timedelta = timedelta(minutes=15),
-                start_hour: timedelta | None = str_to_delta('07:00 AM'),
-                end_hour: timedelta | None = str_to_delta('10:00 PM'),
-                break_time: dict[str, dict] | None = None,
-                first_in_thresh: timedelta = str_to_delta('10:30 AM'),
-                last_out_thresh: timedelta = str_to_delta('02:30 PM'),
-                round_to: list[timedelta] | None = None,
-                output_filename: str = 'timesheet_summary.xlsx') -> Path | None:
+def process_timesheet(df: pd.DataFrame,
+                      buffer: timedelta = timedelta(minutes=15),
+                      start_hour: timedelta | None = str_to_delta('07:00 AM'),
+                      end_hour: timedelta | None = str_to_delta('10:00 PM'),
+                      break_time: dict[str, dict] | None = None,
+                      first_in_thresh: timedelta = str_to_delta('10:30 AM'),
+                      last_out_thresh: timedelta = str_to_delta('02:30 PM'),
+                      round_to: list[timedelta] | None = None,
+                      output_filename: str = 'timesheet_summary.xlsx') -> Path | None:
     """
     Main orchestration function to process a raw timesheet DataFrame.
 
@@ -1527,9 +1605,7 @@ def process_csv(df: pd.DataFrame,
         break_time[key] = converted_break_time
 
     # Pre-process
-    df = process_headers(df)
     df = standardize_logtype(df)
-    df = add_datetime(df)
     df = sort_df(df)
     comment_header: str = 'Raw Data:'
     original_timestamps: dict[tuple[str, str], str] = record_timestamps(df, comment_header)
@@ -1596,8 +1672,16 @@ def run_default():
     output_filename: str = 'timesheet_summary.xlsx'
 
     # Process
-    process_csv(pd.read_csv(file_path), buffer, start_hour, end_hour, break_time, first_in_thresh,
-                last_out_thresh, round_to, output_filename)
+    try:
+        df, logs = read_input_file(file_path)
+        for log_message in logs:
+            print(log_message)
+    except (ValueError, FileNotFoundError) as e:
+        print(f'Error: Could not read input file. Details: {e}')
+        return
+
+    process_timesheet(df, buffer, start_hour, end_hour, break_time, first_in_thresh,
+                      last_out_thresh, round_to, output_filename)
     return
 
 if __name__ == '__main__':
