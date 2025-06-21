@@ -6,6 +6,46 @@ from openpyxl.comments import Comment
 from openpyxl.utils import get_column_letter
 from platform import system
 
+# ==============================================================================
+# FLAG CONFIGURATION
+# Central source of truth for all processing flags.
+#
+# Properties:
+#   - text: The user-facing message that appears in the Excel comment.
+#   - crucial: (bool) If True, the cell will be highlighted red as it requires
+#              manual intervention. If False, it's a non-critical notice.
+# ==============================================================================
+FLAG_CONFIG: dict[str, dict] = {
+    'early_in': {
+        'text': 'Info: Early Clock-In.',
+        'crucial': False
+    },
+    'late_exit': {
+        'text': 'Info: Late Clock-Out.',
+        'crucial': False
+    },
+    'missing_first_in': {
+        'text': 'CRITICAL: Missing First In.',
+        'crucial': True
+    },
+    'missing_last_out': {
+        'text': 'CRITICAL: Missing Last Out.',
+        'crucial': True
+    },
+    'unpunched_breaks': {
+        'text': 'Info: Breaktime inserted.',
+        'crucial': False
+    },
+    'check_break_time': {
+        'text': 'REVIEW: Breaktime punch.',
+        'crucial': True
+    },
+    'for_manual_checking': {
+        'text': 'REVIEW: Unresolved sequence.',
+        'crucial': True
+    }
+}
+
 def preprocess_sheet(df_raw: pd.DataFrame) -> pd.DataFrame | None:
     """
     Takes a raw DataFrame (from one sheet or file) and performs initial processing.
@@ -170,7 +210,7 @@ def process_headers(df: pd.DataFrame) -> pd.DataFrame:
             raise ValueError(f'NAME column not found in df with columns {standardized_columns}.')
 
     # Get date column
-    for col in ['LOGDATE', 'DATE', 'DAY', 'WORKDATE', 'PUNCHDATE', 'TRANSDATE', 'ENTRYDATE', 'TDATE', 'FECHA']:
+    for col in ['LOGDATE', 'DATE', 'DAY', 'WORKDATE', 'PUNCHDATE', 'TRANSDATE', 'ENTRYDATE', 'TDATE', 'FECHA', 'ARAW']:
         if col in standardized_columns:
             date_col = col
             break
@@ -179,7 +219,7 @@ def process_headers(df: pd.DataFrame) -> pd.DataFrame:
 
     # Get time column
     for col in ['LOGTIME', 'LOGHOUR', 'HOUR', 'TIME', 'PUNCHTIME', 'ENTRYTIME',
-                'TTIME', 'TRANSTIME', 'CLOCKTIME', 'HORA']:
+                'TTIME', 'TRANSTIME', 'CLOCKTIME', 'HORA', 'ORAS']:
         if col in standardized_columns:
             time_col = col
             break
@@ -188,7 +228,7 @@ def process_headers(df: pd.DataFrame) -> pd.DataFrame:
 
     # Get IN_OUT column
     for col in ['INOUT', 'LOGTYPE', 'TYPE', 'DIRECTION', 'ENTRYTYPE', 'STATUS', 'EVENT',
-                'EVENTTYPE', 'INOUTTYPE', 'MOVEMENT']:
+                'EVENTTYPE', 'INOUTTYPE', 'MOVEMENT', 'PUNCH', 'PUNCHTYPE', 'PUNCHINOUT', 'CATEGORY', 'CAT']:
         if col in standardized_columns:
             in_out_col = col
             break
@@ -342,27 +382,46 @@ def create_grid(df: pd.DataFrame) -> pd.DataFrame:
 
 def sort_df(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Sorts the DataFrame and ensures consistent naming for each employee ID.
+    Sorts DataFrame, ensures consistent naming, and resolves name conflicts.
 
-    This function first establishes a canonical 'NAME' for each 'ID' based on
-    the first occurrence. It then maps this canonical name back to all rows,
-    ensuring consistency. Finally, it sorts the entire DataFrame by the
-    canonical 'NAME' and then by 'DATETIME'.
+    This function performs three main tasks:
+    1.  Establishes a canonical 'NAME' for each 'ID' based on the first
+        occurrence to handle intra-employee name inconsistencies (e.g., 'Bob'/'Robert').
+    2.  Identifies 'NAME's that are used by more than one unique 'ID' (a conflict).
+    3.  For conflicting names, it creates a new unique name by appending the 'ID'
+        (e.g., 'John Smith' becomes 'John Smith (101)').
+    4.  Finally, it sorts the entire DataFrame by the resolved 'NAME' and then
+        by 'DATETIME'.
 
     Args:
-        df: The DataFrame to sort.
+        df: The DataFrame to sort. It must contain 'ID', 'NAME', and 'DATETIME' columns.
 
     Returns:
-        A sorted DataFrame with a consistent 'NAME' for each 'ID' and a reset index.
+        A sorted DataFrame with consistent and unique names for each employee,
+        with the index reset.
     """
-    # Create a mapping from ID to the first encountered NAME
+    # 1. Establish a canonical 'NAME' for each 'ID'
+    # This handles cases where one person has multiple name entries (e.g., 'J. Doe', 'Jane Doe')
     id_to_name: pd.Series = df.drop_duplicates(subset=['ID']).set_index('ID')['NAME']
-
-    # Map this primary name back to the DataFrame
     df['NAME'] = df['ID'].map(id_to_name)
 
-    # sorting
+    # 2. Find names that are used by more than one ID
+    # Group by name and count the number of unique IDs for each name
+    name_counts = df.groupby('NAME')['ID'].nunique()
+    # Filter to get only the names with more than one unique ID
+    conflicting_names = name_counts[name_counts > 1].index
+
+    # 3. Resolve conflicts by appending the ID to the name
+    # Create a boolean mask for rows that have a conflicting name
+    is_conflict = df['NAME'].isin(conflicting_names)
+
+    # For the conflicting rows, update the NAME to "NAME (ID)"
+    # .loc is used to ensure we are modifying the DataFrame correctly
+    df.loc[is_conflict, 'NAME'] = df.loc[is_conflict, 'NAME'] + ' (' + df.loc[is_conflict, 'ID'].astype(str) + ')'
+
+    # 4. Sort the DataFrame by the resolved name and then by datetime
     df = df.sort_values(by=['NAME', 'DATETIME'], ascending=[True, True])
+
     return df.reset_index(drop=True)
 
 def standardize_logtype(df: pd.DataFrame) -> pd.DataFrame:
@@ -408,14 +467,14 @@ def standardize_logtype(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError('LOGTYPE was not completely parsed. Be sure IN/OUT column is properly formatted.')
     return df
 
-def remove_duplicated_punch(df: pd.DataFrame, buffer: timedelta) -> pd.DataFrame:
+def remove_same_type_duplicate(df: pd.DataFrame, buffer: timedelta) -> pd.DataFrame:
     """
     Removes duplicate or redundant punches within a specified time buffer.
+    Only handles same type punches e.g. in-in or out-out
 
     This function implements complex logic to clean up punches that are too
     close together. It handles:
     - Duplicates of the same type (e.g., 'in', 'in').
-    - Duplicates of different types (e.g., 'in', 'out').
     - It uses the 'VERIFIED' status to prioritize which punch to keep.
 
     Args:
@@ -428,14 +487,10 @@ def remove_duplicated_punch(df: pd.DataFrame, buffer: timedelta) -> pd.DataFrame
     # Helper column
     df['PRIOR_INDEX'] = df['INDEX'].shift(1)
 
-    to_be_removed: set[int] = set()
-    to_be_verified: set[int] = set()
+    to_be_removed: set = set()
 
     for employee_id in df['ID'].unique().tolist():
         filtered: pd.DataFrame = df[df['ID'] == employee_id]
-
-        # ==============================================================================================================
-        # Handle different type duplicates
 
         # if same_type and earlier entry is verified, remove later entry
         same_type_mask: pd.Series = (filtered['DATETIME'].diff() <= buffer) & (filtered['TYPE'] == filtered['TYPE'].shift(1))
@@ -465,88 +520,80 @@ def remove_duplicated_punch(df: pd.DataFrame, buffer: timedelta) -> pd.DataFrame
         if not indices.empty:
             to_be_removed.update(indices)
 
-        # ==============================================================================================================
-        # Handle different type duplicates
-        strict_buffer: timedelta = buffer/2
+    if to_be_removed:
+        df = df[~df['INDEX'].isin(to_be_removed)]
 
-        # --------------------------------------------------------
-        # if in_out_mask and earlier verified
-        # --------------------------------------------------------
-        in_out_mask = (filtered['DATETIME'].diff() <= strict_buffer) & (filtered['TYPE'].shift(1) == 'in') & (filtered['TYPE'] == 'out')
-        indices_df: pd.DataFrame = filtered.loc[in_out_mask &
-                                                (filtered['VERIFIED'].shift(2) == True) &
-                                                (filtered['TYPE'].shift(2) == 'in'), ['INDEX', 'PRIOR_INDEX']]
-        if not indices_df.empty:
-            to_be_removed.update(indices_df['PRIOR_INDEX'])  # Removes duplicate 'in'
-            to_be_verified.update(indices_df['INDEX'])
+    # Remove helper column
+    df = df.drop('PRIOR_INDEX', axis='columns')
+    return df
 
-        indices_df = filtered.loc[in_out_mask &
-                                  (filtered['VERIFIED'].shift(2) == True) &
-                                  (filtered['TYPE'].shift(2) == 'out'), ['INDEX', 'PRIOR_INDEX']]
-        if not indices_df.empty:
-            to_be_removed.update(indices_df['INDEX'])  # Removes duplicate 'out'
-            to_be_verified.update(indices_df['PRIOR_INDEX'])
+def remove_diff_type_duplicate(df: pd.DataFrame, buffer: timedelta) -> pd.DataFrame:
+    """
+    Removes redundant, close-proximity punches of different types (in-out or out-in).
 
-        # --------------------------------------------------------
-        # if in_out_mask and later verified
-        # --------------------------------------------------------
-        indices_df = filtered.loc[in_out_mask &
-                                  (filtered['VERIFIED'].shift(-1) == True) &
-                                  (filtered['TYPE'].shift(-1) == 'in'), ['INDEX', 'PRIOR_INDEX']]
-        if not indices_df.empty:
-            to_be_removed.update(indices_df['PRIOR_INDEX'])  # Removes duplicate 'in'
-            to_be_verified.update(indices_df['INDEX'])
+    This function targets ambiguous punch pairs that occur within the specified time
+    buffer. It's designed to clean up scenarios where a user might have
+    accidentally punched twice in quick succession, creating an illogical sequence.
 
-        indices_df = filtered.loc[in_out_mask &
-                               (filtered['VERIFIED'].shift(-1) == True) &
-                               (filtered['TYPE'].shift(-1) == 'out'), ['INDEX', 'PRIOR_INDEX']]
-        if not indices_df.empty:
-            to_be_removed.update(indices_df['INDEX'])  # Removes duplicate 'out'
-            to_be_verified.update(indices_df['PRIOR_INDEX'])
+    It intelligently removes one of the punches in the pair by examining the
+    surrounding verified punches to restore a logical pattern. For example:
+    - In a sequence like `verified IN -> (IN-OUT) -> verified IN`, the pair is likely erroneous.
+    - It handles `in-out` and `out-in` patterns by checking the punches that
+      come two steps before and one step after the current position.
 
-        # --------------------------------------------------------
-        # if out_in_mask and earlier verified
-        # --------------------------------------------------------
-        out_in_mask = (filtered['DATETIME'].diff() <= strict_buffer) & (filtered['TYPE'].shift(1) == 'out') & (filtered['TYPE'] == 'in')
-        indices_df = filtered.loc[out_in_mask &
-                               (filtered['VERIFIED'].shift(2) == True) &
-                               (filtered['TYPE'].shift(2) == 'in') &
-                               (filtered['DATE'].shift(2) == filtered['DATE']), ['INDEX', 'PRIOR_INDEX']]
-        if not indices_df.empty:
-            to_be_removed.update(indices_df['INDEX'])  # Removes duplicate 'in'
-            to_be_verified.update(indices_df['PRIOR_INDEX'])
+    Args:
+        df: The sorted DataFrame with helper columns ('INDEX', 'VERIFIED').
+        buffer: The timedelta within which punches are considered duplicates.
 
-        indices_df = filtered.loc[out_in_mask &
-                               (filtered['VERIFIED'].shift(2) == True) &
-                               (filtered['TYPE'].shift(2) == 'out') &
-                               (filtered['DATE'].shift(2) == filtered['DATE']), ['INDEX', 'PRIOR_INDEX']]
-        if not indices_df.empty:
-            to_be_removed.update(indices_df['PRIOR_INDEX'])  # Removes duplicate 'out'
-            to_be_verified.update(indices_df['INDEX'])
+    Returns:
+        A DataFrame with duplicate punches removed.
+    """
+    # Helper column
+    df['PRIOR_INDEX'] = df['INDEX'].shift(1)
 
-        # --------------------------------------------------------
-        # if in_out_mask and later verified
-        # --------------------------------------------------------
-        indices_df = filtered.loc[out_in_mask &
-                               (filtered['VERIFIED'].shift(-1) == True) &
-                               (filtered['TYPE'].shift(-1) == 'in') &
-                               (filtered['DATE'].shift(-1) == filtered['DATE']), ['INDEX', 'PRIOR_INDEX']]
-        if not indices_df.empty:
-            to_be_removed.update(indices_df['INDEX'])  # Removes duplicate 'in'
-            to_be_verified.update(indices_df['PRIOR_INDEX'])
+    to_be_removed: set = set()
 
-        indices_df = filtered.loc[out_in_mask &
-                               (filtered['VERIFIED'].shift(-1) == True) &
-                               (filtered['TYPE'].shift(-1) == 'out') &
-                               (filtered['DATE'].shift(-1) == filtered['DATE']), ['INDEX', 'PRIOR_INDEX']]
-        if not indices_df.empty:
-            to_be_removed.update(indices_df['PRIOR_INDEX'])  # Removes duplicate 'out'
-            to_be_verified.update(indices_df['INDEX'])
+    for employee_id in df['ID'].unique().tolist():
+        filtered: pd.DataFrame = df[df['ID'] == employee_id]
+
+        # in out -------------------------------------------------------------------------------------------------------
+        in_out_mask: pd.Series = ((filtered['DATETIME'].diff() <= buffer) &
+                                  (filtered['TYPE'].shift(1) == 'in') &
+                                  (filtered['TYPE'] == 'out'))
+        # prior
+        in_in_out: pd.Series = filtered.loc[in_out_mask &
+                                            (filtered['TYPE'].shift(2) == 'in') &
+                                            (filtered['VERIFIED'].shift(2) == True), 'PRIOR_INDEX']
+        if not in_in_out.empty:
+            to_be_removed.update(in_in_out)
+
+        # next
+        in_out_out: pd.Series = filtered.loc[in_out_mask &
+                                            (filtered['TYPE'].shift(-1) == 'out') &
+                                            (filtered['VERIFIED'].shift(-1) == True), 'INDEX']
+        if not in_out_out.empty:
+            to_be_removed.update(in_out_out)
+
+        # out in -------------------------------------------------------------------------------------------------------
+        out_in_mask: pd.Series = ((filtered['DATETIME'].diff() <= buffer) &
+                                  (filtered['TYPE'].shift(1) == 'out') &
+                                  (filtered['TYPE'] == 'in'))
+        # prior
+        out_out_in: pd.Series = filtered.loc[out_in_mask &
+                                            (filtered['TYPE'].shift(2) == 'out') &
+                                            (filtered['VERIFIED'].shift(2) == True), 'PRIOR_INDEX']
+        if not out_out_in.empty:
+            to_be_removed.update(out_out_in)
+
+        # next
+        out_in_in: pd.Series = filtered.loc[out_in_mask &
+                                            (filtered['TYPE'].shift(-1) == 'in') &
+                                            (filtered['VERIFIED'].shift(-1) == True), 'INDEX']
+        if not out_in_in.empty:
+            to_be_removed.update(out_in_in)
 
     if to_be_removed:
         df = df[~df['INDEX'].isin(to_be_removed)]
-    if to_be_verified:
-        df.loc[df['INDEX'].isin(to_be_verified), 'VERIFIED'] = True
 
     # Remove helper column
     df = df.drop('PRIOR_INDEX', axis='columns')
@@ -789,86 +836,158 @@ def adjust_break_time(df: pd.DataFrame, break_time: dict[str, dict], buffer: tim
     # Helper column
     df['NORMALIZED'] = df['DATETIME'].dt.normalize()
     df['PRIOR_INDEX'] = df['INDEX'].shift(1)
+    df['NEXT_INDEX'] = df['INDEX'].shift(-1)
+    to_be_flagged: set = set()
 
     for breaktime_name, data in break_time.items():
         start: timedelta = data['start']
         end: timedelta = data['end']
-        paid: bool = data['paid']
 
-        if not paid:
-            # Auto-adjust Late Clock-outs to start of break time
-            indices: pd.Series = df.loc[(df['TIMEDELTA'] >= start - buffer) &
-                                        (df['TIMEDELTA'] < end - buffer) &
-                                        (df['TYPE'] == 'out'), 'INDEX']
-            if not indices.empty:
-                mask: pd.Series = df['INDEX'].isin(indices)
-                df.loc[mask, 'VERIFIED'] = True
-                df.loc[mask, 'DATETIME'] = df.loc[mask, 'NORMALIZED'] + start
+        verified_in: list[int] = []
+        verified_out: list[int] = []
 
-            # Auto-adjust Early Clock-ins to end of break time
-            indices = df.loc[(df['TIMEDELTA'] <= end + buffer) &
-                             (df['TIMEDELTA'] > start + buffer) &
-                             (df['TYPE'] == 'in'), 'INDEX']
-            if not indices.empty:
-                mask = df['INDEX'].isin(indices)
-                df.loc[mask, 'VERIFIED'] = True
-                df.loc[mask, 'DATETIME'] = df.loc[mask, 'NORMALIZED'] + end
+        # Auto-adjust Late Clock-outs to start of break time
+        indices: pd.Series = df.loc[(df['TIMEDELTA'] >= start - buffer) &
+                                    (df['TIMEDELTA'] < end - buffer) &
+                                    (df['TYPE'] == 'out'), 'INDEX']
+        if not indices.empty:
+            mask: pd.Series = df['INDEX'].isin(indices)
+            df.loc[mask, 'VERIFIED'] = True
+            df.loc[mask, 'DATETIME'] = df.loc[mask, 'NORMALIZED'] + start
 
-            # Adjusted but UNVERIFIED
-            # Auto-adjust Late Clock-outs near the end of breaktime. UNVERIFIED if 'out' or 'in'
-            indices = df.loc[(df['TIMEDELTA'] >= end - buffer) &
-                             (df['TIMEDELTA'] < end) &
-                             (df['TYPE'] == 'out'), 'INDEX']
-            if not indices.empty:
-                mask = df['INDEX'].isin(indices)
-                df.loc[mask, 'DATETIME'] = df.loc[mask, 'NORMALIZED'] + end
+        # Auto-adjust Early Clock-ins to end of break time
+        indices = df.loc[(df['TIMEDELTA'] <= end + buffer) &
+                         (df['TIMEDELTA'] > start + buffer) &
+                         (df['TYPE'] == 'in'), 'INDEX']
+        if not indices.empty:
+            mask = df['INDEX'].isin(indices)
+            df.loc[mask, 'VERIFIED'] = True
+            df.loc[mask, 'DATETIME'] = df.loc[mask, 'NORMALIZED'] + end
 
-            # Auto-adjust Late Clock-ins near the start of breaktime. UNVERIFIED if 'out' or 'in'
-            indices = df.loc[(df['TIMEDELTA'] <= start + buffer) &
-                             (df['TIMEDELTA'] > start) &
-                             (df['TYPE'] == 'in'), 'INDEX']
-            if not indices.empty:
-                mask = df['INDEX'].isin(indices)
-                df.loc[mask, 'DATETIME'] = df.loc[mask, 'NORMALIZED'] + start
+        # Auto-adjust Late Clock-outs near the end of breaktime.
+        indices = df.loc[(df['TIMEDELTA'] >= end - buffer) &
+                         (df['TIMEDELTA'] <= end + buffer) &
+                         (df['TYPE'] == 'out'), 'INDEX']
+        if not indices.empty:
+            verified_in = []
+            verified_out = []
+            for i in indices:
+                filtered: pd.DataFrame = df[df['INDEX'] == i]
 
-        if paid:
-            indices_first_entry = df.groupby(['ID', 'DATE'], as_index=False, group_keys=False).first()['INDEX']
+                # check from prior
+                prior_row: pd.DataFrame = df[df['INDEX'] ==  filtered['PRIOR_INDEX'].iat[0]]
+                if not prior_row.empty:
+                    prior_verified: bool = prior_row['VERIFIED'].iat[0]
+                    prior_type: str = prior_row['TYPE'].iat[0]
+                    prior_id: str = prior_row['ID'].iat[0]
+                    if (prior_type == 'out') & (prior_verified == True) & (filtered['ID'].iat[0] == prior_id):
+                        verified_in.append(i)
+                        continue
+                    elif (prior_type == 'in') & (prior_verified == True) & (filtered['ID'].iat[0] == prior_id):
+                        verified_out.append(i)
+                        continue
 
-            # Remove if there are both clock-ins and clock-outs near the break
-            indices = df.loc[(df['TIMEDELTA'] >= start - buffer) &
-                             (df['TIMEDELTA'] <= end + buffer) &
-                             (df['TYPE'] == 'in') &
-                             (df['TIMEDELTA'].shift(1) >= start - buffer) &
-                             (df['TIMEDELTA'].shift(1) <= end + buffer) &
-                             (df['TYPE'].shift(1) == 'out') &
-                             (~df['INDEX'].isin(indices_first_entry)), ['INDEX', 'PRIOR_INDEX']]
-            if not indices.empty:
-                mask = df['INDEX'].isin(set(indices['INDEX'].tolist() + indices['PRIOR_INDEX'].tolist()))
-                df = df[~mask]  # remove rows
+                # check from next
+                next_row: pd.DataFrame = df[df['INDEX'] ==  filtered['NEXT_INDEX'].iat[0]]
+                if not next_row.empty:
+                    next_verified: bool = next_row['VERIFIED'].iat[0]
+                    next_type: str = next_row['TYPE'].iat[0]
+                    next_id: str = next_row['ID'].iat[0]
+                    if (next_type == 'in') & (next_verified == True) & (filtered['ID'].iat[0] == next_id):
+                        verified_out.append(i)
+                        continue
+                    elif (next_type == 'out') & (next_verified == True) & (filtered['ID'].iat[0] == next_id):
+                        verified_in.append(i)
+                        continue
 
-            # Adjust clock-ins within the break
-            indices = df.loc[(df['TIMEDELTA'] >= start - buffer) &
-                             (df['TIMEDELTA'] <= end + buffer) &
-                             (df['TYPE'] == 'in'), 'INDEX']
-            if not indices.empty:
-                mask = df['INDEX'].isin(indices)
-                df.loc[mask, 'VERIFIED'] = True
-                df.loc[mask, 'DATETIME'] = df.loc[mask, 'NORMALIZED'] + start
+                # cannot be verified
+                to_be_flagged.add(i)
 
-            # Adjust clock-outs within the break
-            indices = df.loc[(df['TIMEDELTA'] >= start - buffer) &
-                             (df['TIMEDELTA'] <= end + buffer) &
-                             (df['TYPE'] == 'out'), 'INDEX']
-            if not indices.empty:
-                mask = df['INDEX'].isin(indices)
-                df.loc[mask, 'VERIFIED'] = True
-                df.loc[mask, 'DATETIME'] = df.loc[mask, 'NORMALIZED'] + start
+        # Auto-adjust Early Clock-ins near the start of breaktime.
+        indices = df.loc[(df['TIMEDELTA'] >= start - buffer) &
+                         (df['TIMEDELTA'] <= start + buffer) &
+                         (df['TYPE'] == 'in'), 'INDEX']
+        if not indices.empty:
+            for i in indices:
+                filtered = df[df['INDEX'] == i]
+
+                # check from prior
+                prior_row = df[df['INDEX'] == filtered['PRIOR_INDEX'].iat[0]]
+                if not prior_row.empty:
+                    prior_verified = prior_row['VERIFIED'].iat[0]
+                    prior_type = prior_row['TYPE'].iat[0]
+                    prior_id = prior_row['ID'].iat[0]
+                    if (prior_type == 'out') & (prior_verified == True) & (filtered['ID'].iat[0] == prior_id):
+                        verified_in.append(i)
+                        continue
+                    elif (prior_type == 'in') & (prior_verified == True) & (filtered['ID'].iat[0] == prior_id):
+                        verified_out.append(i)
+                        continue
+
+                # check from next
+                next_row = df[df['INDEX'] == filtered['NEXT_INDEX'].iat[0]]
+                if not next_row.empty:
+                    next_verified = next_row['VERIFIED'].iat[0]
+                    next_type = next_row['TYPE'].iat[0]
+                    next_id = next_row['ID'].iat[0]
+                    if (next_type == 'in') & (next_verified == True) & (filtered['ID'].iat[0] == next_id):
+                        verified_out.append(i)
+                        continue
+                    elif (next_type == 'out') & (next_verified == True) & (filtered['ID'].iat[0] == next_id):
+                        verified_in.append(i)
+                        continue
+
+                # cannot be verified
+                to_be_flagged.add(i)
+
+        if len(verified_in) > 0:
+            mask = df['INDEX'].isin(verified_in)
+            df.loc[mask, 'TYPE'] = 'in'
+            df.loc[mask, 'DATETIME'] = df.loc[mask, 'NORMALIZED'] + end
+            df.loc[mask, 'VERIFIED'] = True
+
+        if len(verified_out) > 0:
+            mask = df['INDEX'].isin(verified_out)
+            df.loc[mask, 'TYPE'] = 'out'
+            df.loc[mask, 'DATETIME'] = df.loc[mask, 'NORMALIZED'] + start
+            df.loc[mask, 'VERIFIED'] = True
 
     # Reapply
-    df = df.copy()  # fixes view issues caused by slicing df = df[~mask]
-    df['TIME'] = df['DATETIME'].dt.time
-    df['TIMEDELTA'] = df['DATETIME'] - df['NORMALIZED']
-    df = df.drop(['PRIOR_INDEX', 'NORMALIZED'], axis='columns')
+    df['PRIOR_INDEX'] = df['INDEX'].shift(1)
+    df['TIMEDELTA'] = df['DATETIME'] - df['DATETIME'].dt.normalize()
+
+    # Paid breaks
+    for breaktime_name, data in break_time.items():
+        start = data['start']
+        end = data['end']
+        paid: bool = data['paid']
+        if not paid:
+            continue
+
+        # Remove out-in punches within paid breaks
+        indices = df.loc[(df['TIMEDELTA'] <= end + buffer) & (df['TIMEDELTA'] >= start - buffer) &
+                         (df['TYPE'] == 'in') &
+                         (df['TIMEDELTA'].shift(1) >= start - buffer) & (df['TIMEDELTA'].shift(1) <= end + buffer) &
+                         (df['TYPE'].shift(1) == 'out') &
+                         (df['ID'] == df['ID'].shift(1)), ['INDEX', 'PRIOR_INDEX']]
+        if not indices.empty:
+            mask = df['INDEX'].isin(set(indices['INDEX'].tolist() + indices['PRIOR_INDEX'].tolist()))
+            df = df[~mask]  # remove rows
+
+        # Adjust clock in punches to the start
+        indices = df.loc[(df['TIMEDELTA'] <= end + buffer) &
+                         (df['TYPE'] == 'in') &
+                         (df['TIMEDELTA'] >= start - buffer), 'INDEX']
+        if not indices.empty:
+            mask = df['INDEX'].isin(indices)
+            df.loc[mask, 'DATETIME'] = df.loc[mask, 'NORMALIZED'] + start
+
+    # Remove helper columns
+    df = df.drop(['NORMALIZED', 'PRIOR_INDEX', 'NEXT_INDEX'], axis='columns')
+
+    # Flag
+    flag: list[dict] = df.loc[df['INDEX'].isin(to_be_flagged), ['ID', 'DATE']].to_dict(orient='records')
+    flags.setdefault('check_break_time', []).extend(flag)
     return df
 
 def verify_in_betweens(df: pd.DataFrame, flags: dict[str, list]) -> pd.DataFrame:
@@ -1120,7 +1239,7 @@ def flag_odd_groups(df: pd.DataFrame, flags: dict[str, list]) -> pd.DataFrame:
 
     return df.drop('GROUP', axis='columns')
 
-def adjust_and_round(df: pd.DataFrame, round_to: list[timedelta], buffer) -> pd.DataFrame:
+def adjust_and_round(df: pd.DataFrame, round_to: list[timedelta], buffer: timedelta) -> pd.DataFrame:
     """
     Rounds punch times to the nearest specified time if they fall within a buffer.
 
@@ -1208,8 +1327,7 @@ def create_summary(df: pd.DataFrame):
 def combine_comments(timestamp_old: dict[tuple[str, str], str],
                      timestamp_new: dict[tuple[str, str], str],
                      flags: dict[str, list],
-                     comment_init_header: str = '',
-                     silence: list[str] | None = None) -> dict[tuple[str, str], str]:
+                     silence_flags: list[str] | None = None) -> dict[tuple[str, str], str]:
     """
     Combines raw timestamps, processed timestamps, and flags into comment strings.
 
@@ -1217,52 +1335,58 @@ def combine_comments(timestamp_old: dict[tuple[str, str], str],
         timestamp_old: Dict of raw timestamp strings.
         timestamp_new: Dict of processed timestamp strings.
         flags: Dict of all generated flags.
-        comment_init_header: A header string to identify the start of the comment block.
-        silence: A list of flag keys to ignore when generating comments.
+        silence_flags: A list of flag keys (from FLAG_CONFIG) to ignore when generating comments.
 
     Returns:
         A dictionary mapping (ID, DATE) tuples to a final, combined comment string.
     """
+    if silence_flags is None:
+        silence_flags = []
+
     comments: dict[tuple[str, str], str] = {}
-    for key, comment_old in timestamp_old.items():
-        comments[key] = (f'{comment_old}\n'
-                       f'{timestamp_new[key]}')
+    all_keys = set(timestamp_old.keys()) | set(timestamp_new.keys())
 
-    for key, comment in comments.items():
-        comments[key] = f'{comment}\n✨[rs_uy]'
+    # De-duplicate flags first
+    for key, values in flags.items():
+        flags[key] = remove_duplicate_dicts(values)
 
-    flag_comment: dict[str, str] = {
-        'for_manual_checking': 'Requires Manual Review',
-        'early_in': 'Clock-In Too Early',
-        'late_exit': 'Clock-Out Too Late',
-        'missing_first_in': 'First Clock-In Missing',
-        'missing_last_out': 'Last Clock-Out Missing',
-        'unpunched_breaks': 'Break Time Missing'
-    }
+    # Add flags to any relevant keys
+    for flag_name, flagged_items in flags.items():
+        if flag_name in silence_flags:
+            continue
+        config = FLAG_CONFIG.get(flag_name)
+        if not config:
+            print(f"Warning: No config for flag '{flag_name}'.")
+            continue
 
-    # silence
-    flags_copy = flags.copy()
-    flags_copy = {key: value for key, value in flags_copy.items() if key not in silence}
-
-    # De-duplicate flags
-    for key, values in flags_copy.items():
-        flags_copy[key] = remove_duplicate_dicts(values)
-
-    # Add flags
-    name: str
-    for name, values in flags_copy.items():
-        for value in values:
-            key: tuple[str, str] = (value['ID'], value['DATE'])
+        comment_to_add = config['text']
+        for item in flagged_items:
+            key = (item['ID'], item['DATE'])
+            all_keys.add(key)
             if key in comments:
-                comment: str = comments[key]
-                add_comment: str = flag_comment.get(name, 'Requires Manual Review')
-                if add_comment not in comment:
-                    if comment.startswith(comment_init_header):
-                        comment = f'\n{comment}'
-                    comments[key] = (f'{add_comment}\n'
-                                     f'{comment}')
+                if comment_to_add not in comments[key]:
+                    comments[key] += f'\n{comment_to_add}'
             else:
-                comments[key] = f'{flag_comment.get(name, 'Requires Manual Review')}'
+                comments[key] = comment_to_add
+
+    # Now, append the timestamp data to every key that has content
+    for key in all_keys:
+        flag_part = comments.get(key, "") + '\n'
+        old_ts_part = timestamp_old.get(key, "")
+        new_ts_part = timestamp_new.get(key, "Processed Data:\n[No punches after processing]")
+
+        # Combine all parts with clear separators
+        final_comment_parts = []
+        if flag_part:
+            final_comment_parts.append(flag_part)
+        if old_ts_part:
+            final_comment_parts.append(old_ts_part)
+
+        final_comment_parts.append(new_ts_part)
+        final_comment_parts.append("✨[rs_uy]")
+
+        comments[key] = '\n'.join(final_comment_parts)
+
     return comments
 
 def insert_breaks(df: pd.DataFrame, break_times: dict[str, dict],
@@ -1341,7 +1465,7 @@ def insert_breaks(df: pd.DataFrame, break_times: dict[str, dict],
                     last_in_row = None  # Reset after processing an out punch
 
     # Flag
-    if len(flags) > 0:
+    if len(flag) > 0:
         flags.setdefault('unpunched_breaks', []).extend(flag)
 
     if new_rows_data:
@@ -1371,8 +1495,8 @@ def get_crucial_flags(flags: dict[str, list]) -> list[tuple[str, str]]:
     """
     Extracts a de-duplicated list of cells that require crucial manual attention.
 
-    These flags typically indicate data that could not be automatically resolved
-    and will be highlighted in the final report.
+    Cruciality is determined by the `crucial: True` property in the global
+    FLAG_CONFIG dictionary.
 
     Args:
         flags: The dictionary containing all generated flags.
@@ -1380,15 +1504,18 @@ def get_crucial_flags(flags: dict[str, list]) -> list[tuple[str, str]]:
     Returns:
         A de-duplicated list of (ID, DATE) tuples for crucial flags.
     """
-    crucial_flags: list[str] =  ['for_manual_checking', 'missing_first_in', 'missing_last_out']
-    result: list[tuple[str, str]] = []
-    for key, value in flags.items():
-        if key in crucial_flags:
-            list_of_tuples: list[tuple[str, str]] = [(item['ID'], item['DATE']) for item in value]
-            result.extend(list_of_tuples)
+    crucial_cells: set[tuple[str, str]] = set()
 
-    # De-duplicate the list
-    return list(set(result))
+    # Iterate through the flags that were actually raised for this run
+    for flag_name, flagged_items in flags.items():
+        config: dict = FLAG_CONFIG.get(flag_name)
+        # Check if the flag is defined in our config and is marked as crucial
+        if config and config['crucial']:
+            # Add all cells associated with this crucial flag to our set
+            for item in flagged_items:
+                crucial_cells.add((item['ID'], item['DATE']))
+
+    return list(crucial_cells)
 
 def find_writable_filename(output_path: str) -> Path:
     """
@@ -1606,8 +1733,7 @@ def process_timesheet(df: pd.DataFrame,
     # Pre-process
     df = standardize_logtype(df)
     df = sort_df(df)
-    comment_header: str = 'Raw Data:'
-    original_timestamps: dict[tuple[str, str], str] = record_timestamps(df, comment_header)
+    original_timestamps: dict[tuple[str, str], str] = record_timestamps(df, 'Raw Data:')
     df = add_helper_cols(df)
 
     flags: dict[str, list] = {}
@@ -1624,11 +1750,14 @@ def process_timesheet(df: pd.DataFrame,
     df = verify_first_in(df, break_time, first_in_thresh, buffer, flags)
     df = verify_last_out(df, break_time, last_out_thresh, buffer, flags)
 
-    # Step 4: Verify lunch out and lunch in
+    # Step 4: Remove duplicates of the same punch (in-in or out-out)
+    df = remove_same_type_duplicate(df, buffer)
+
+    # Step 5: Verify lunch out and lunch in
     df = adjust_break_time(df, break_time, buffer, flags)
 
-    # Step 5: Remove consecutive entries within buffer time
-    df = remove_duplicated_punch(df, buffer)
+    # Step 6: Remove duplicates of different punch (in-out or out-in)
+    df = remove_diff_type_duplicate(df, buffer)
 
     # Step 6: In-between verified
     df = verify_in_betweens(df, flags)
@@ -1651,18 +1780,17 @@ def process_timesheet(df: pd.DataFrame,
     # create summary
     new_timestamps: dict[tuple[str, str], str] = record_timestamps(df, 'Processed Data:')
     summary: pd.DataFrame = create_summary(df)
-    comments: dict[tuple[str, str], str] = combine_comments(original_timestamps, new_timestamps, flags,
-                                                            comment_header, silence=['early_in', 'late_exit'])
+    comments: dict[tuple[str, str], str] = combine_comments(original_timestamps, new_timestamps, flags)
     crucial_flags: list[tuple[str, str]] = get_crucial_flags(flags)
     return create_sheet(summary, comments, crucial_flags, output_filename)
 
 def run_default():
     # Parameters
-    file_path: Path = Path('sample.csv')
+    file_path: Path = Path('sampol.xlsx')
     buffer: timedelta = timedelta(minutes=15)
     start_hour: timedelta = str_to_delta('07:00 AM')
     end_hour: timedelta = str_to_delta('10:00 PM')
-    first_in_thresh: timedelta = str_to_delta('10:30 AM')
+    first_in_thresh: timedelta = str_to_delta('08:30 AM')
     last_out_thresh: timedelta = str_to_delta('02:30 PM')
     break_time = {'lunch': {'start': '12:00 PM', 'end': '01:00 PM', 'paid': False},
                   'dinner': {'start': '06:00 PM', 'end': '06:30 PM', 'paid': True}}
