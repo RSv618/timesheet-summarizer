@@ -1768,7 +1768,7 @@ def process_timesheet(df: pd.DataFrame,
                       start_hour: timedelta | None = str_to_delta('07:00 AM'),
                       end_hour: timedelta | None = str_to_delta('10:00 PM'),
                       break_time: dict[str, dict] | None = None,
-                      first_in_thresh: timedelta = str_to_delta('10:30 AM'),
+                      first_in_thresh: timedelta = str_to_delta('09:30 AM'),
                       last_out_thresh: timedelta = str_to_delta('02:30 PM'),
                       round_to: list[timedelta] | None = None,
                       output_filename: str = 'timesheet_summary.xlsx') -> Path | None:
