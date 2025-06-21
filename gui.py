@@ -107,7 +107,7 @@ class TimesheetApp(QWidget):
             self.end_hour_check.setChecked(True)
             self.end_hour_combo.setCurrentText("10:00 PM")
             self.buffer_spinbox.setValue(15)
-            self.first_in_combo.setCurrentText("10:30 AM")
+            self.first_in_combo.setCurrentText("09:30 AM")
             self.last_out_combo.setCurrentText("02:30 PM")
             self.breaks_table.setRowCount(0)
             self._add_break_row("Lunch", "12:00 PM", "01:00 PM", False)

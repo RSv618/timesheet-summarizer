@@ -1866,7 +1866,7 @@ def run_default():
     buffer: timedelta = timedelta(minutes=15)
     start_hour: timedelta = str_to_delta('07:00 AM')
     end_hour: timedelta = str_to_delta('10:00 PM')
-    first_in_thresh: timedelta = str_to_delta('08:30 AM')
+    first_in_thresh: timedelta = str_to_delta('09:30 AM')
     last_out_thresh: timedelta = str_to_delta('02:30 PM')
     break_time = {'lunch': {'start': '12:00 PM', 'end': '01:00 PM', 'paid': False},
                   'dinner': {'start': '06:00 PM', 'end': '06:30 PM', 'paid': True}}
