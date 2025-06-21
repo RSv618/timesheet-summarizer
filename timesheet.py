@@ -41,20 +41,20 @@ FLAG_CONFIG: dict[str, dict] = {
         'crucial': True
     },
     'for_manual_checking': {
-        'text': 'REVIEW: Unresolved sequence.',
+        'text': 'REVIEW: Unresolved.',
         'crucial': True
     },
     # --- WARNING FLAGS (Crucial: True) ---
     'short_duration_day': {
-        'text': 'REVIEW: Very short workday.',
+        'text': 'REVIEW: Short workday.',
         'crucial': True
     },
     'long_duration_day': {
-        'text': 'REVIEW: Very long workday.',
+        'text': 'REVIEW: Long workday.',
         'crucial': True
     },
     'excessive_punches': {
-        'text': 'REVIEW: Too many punches.',
+        'text': 'REVIEW: Over-punched.',
         'crucial': True
     },
     'imbalanced_day': {
