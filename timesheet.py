@@ -34,16 +34,33 @@ FLAG_CONFIG: dict[str, dict] = {
     },
     'unpunched_breaks': {
         'text': 'Info: Breaktime inserted.',
-        'crucial': False
+        'crucial': True
     },
     'check_break_time': {
-        'text': 'REVIEW: Breaktime punch.',
+        'text': 'REVIEW: Breaktime.',
         'crucial': True
     },
     'for_manual_checking': {
         'text': 'REVIEW: Unresolved sequence.',
         'crucial': True
-    }
+    },
+    # --- WARNING FLAGS (Crucial: True) ---
+    'short_duration_day': {
+        'text': 'REVIEW: Very short workday.',
+        'crucial': True
+    },
+    'long_duration_day': {
+        'text': 'REVIEW: Very long workday.',
+        'crucial': True
+    },
+    'excessive_punches': {
+        'text': 'REVIEW: Too many punches.',
+        'crucial': True
+    },
+    'imbalanced_day': {
+        'text': 'REVIEW: Punch Type.',
+        'crucial': True
+    },
 }
 
 def preprocess_sheet(df_raw: pd.DataFrame) -> pd.DataFrame | None:
@@ -295,8 +312,8 @@ def generate_date_formats() -> list[str]:
     d_mod = '%-d' if system() != 'Windows' else '%#d'
     m_mod = '%-m' if system() != 'Windows' else '%#m'
     # For hour
-    H_mod = '%-H' if system() != 'Windows' else '%#H'  # 24-hr
-    I_mod = '%-I' if system() != 'Windows' else '%#I'  # 12-hr
+    h_mod = '%-H' if system() != 'Windows' else '%#H'  # 24-hr
+    i_mod = '%-I' if system() != 'Windows' else '%#I'  # 12-hr
 
     # 2. Define the building blocks for the format strings
     day_parts = ['%d', d_mod]
@@ -308,14 +325,18 @@ def generate_date_formats() -> list[str]:
     time_formats = [
         # With seconds
         f'%H:%M:%S',  # 24h padded
-        f'{H_mod}:%M:%S',  # 24h non-padded
+        f'{h_mod}:%M:%S',  # 24h non-padded
         f'%I:%M:%S %p',  # 12h padded
-        f'{I_mod}:%M:%S %p',  # 12h non-padded
+        f'%I:%M:%S%p',
+        f'{i_mod}:%M:%S %p',  # 12h non-padded
+        f'{i_mod}:%M:%S%p',
         # Without seconds
         f'%H:%M',  # 24h padded
-        f'{H_mod}:%M',  # 24h non-padded
+        f'{h_mod}:%M',  # 24h non-padded
         f'%I:%M %p',  # 12h padded
-        f'{I_mod}:%M %p',  # 12h non-padded
+        f'%I:%M%p',
+        f'{i_mod}:%M %p',  # 12h non-padded
+        f'{i_mod}:%M%p',
     ]
 
     final_formats = []
@@ -415,7 +436,7 @@ def sort_df(df: pd.DataFrame) -> pd.DataFrame:
     # Create a boolean mask for rows that have a conflicting name
     is_conflict = df['NAME'].isin(conflicting_names)
 
-    # For the conflicting rows, update the NAME to "NAME (ID)"
+    # For the conflicting rows, update the NAME to 'NAME (ID)'
     # .loc is used to ensure we are modifying the DataFrame correctly
     df.loc[is_conflict, 'NAME'] = df.loc[is_conflict, 'NAME'] + ' (' + df.loc[is_conflict, 'ID'].astype(str) + ')'
 
@@ -618,7 +639,7 @@ def adjust_first_in(df: pd.DataFrame, start_hour: timedelta, buffer: timedelta, 
     """
     # --- Flagging Logic ---
     # Identify records to be flagged (time of day is 'way before' start_hour)
-    to_be_flagged_mask: pd.Series = df['TIMEDELTA'] < start_hour - buffer
+    to_be_flagged_mask: pd.Series = df['TIMEDELTA'] < start_hour - 2*buffer
     if not to_be_flagged_mask.empty:
         flag: list = df.loc[to_be_flagged_mask, ['ID', 'DATE']].to_dict(orient='records')
         flags.setdefault('early_in', []).extend(flag)
@@ -653,7 +674,7 @@ def adjust_last_out(df: pd.DataFrame, end_hour: timedelta, buffer: timedelta, fl
     """
     # --- Flagging Logic ---
     # Identify records to be flagged (time of day is 'way after' end_hour)
-    to_be_flagged_mask: pd.Series = df['TIMEDELTA'] > end_hour + buffer
+    to_be_flagged_mask: pd.Series = df['TIMEDELTA'] > end_hour + 2*buffer
     if not to_be_flagged_mask.empty:
         flag: list = df.loc[to_be_flagged_mask, ['ID', 'DATE']].to_dict(orient='records')
         flags.setdefault('late_exit', []).extend(flag)
@@ -1031,26 +1052,30 @@ def verify_in_betweens(df: pd.DataFrame, flags: dict[str, list]) -> pd.DataFrame
 
         # In between two verified ins
         indices: pd.Series = filtered.loc[(filtered['PRIOR_TYPE'] == 'in') & (filtered['NEXT_TYPE'] == 'in'), 'INDEX']
-        mask: pd.Series = df['INDEX'].isin(indices)
-        df.loc[mask, 'TYPE'] = 'out'
-        df.loc[mask, 'VERIFIED'] = True
+        if not indices.empty:
+            mask: pd.Series = df['INDEX'].isin(indices)
+            df.loc[mask, 'TYPE'] = 'out'
+            df.loc[mask, 'VERIFIED'] = True
 
         # In between two verified outs
         indices = filtered.loc[(filtered['PRIOR_TYPE'] == 'out') & (filtered['NEXT_TYPE'] == 'out'), 'INDEX']
-        mask = df['INDEX'].isin(indices)
-        df.loc[mask, 'TYPE'] = 'in'
-        df.loc[mask, 'VERIFIED'] = True
+        if not indices.empty:
+            mask = df['INDEX'].isin(indices)
+            df.loc[mask, 'TYPE'] = 'in'
+            df.loc[mask, 'VERIFIED'] = True
 
         # Flag
         indices = filtered.loc[(filtered['PRIOR_TYPE'] == 'in') & (filtered['NEXT_TYPE'] == 'out'), 'INDEX']
-        mask = df['INDEX'].isin(indices)
-        flag.extend(df.loc[mask, ['ID', 'DATE']].to_dict(orient='records'))
-        df = df[~mask]
+        if not indices.empty:
+            mask = df['INDEX'].isin(indices)
+            flag.extend(df.loc[mask, ['ID', 'DATE']].to_dict(orient='records'))
+            df = df[~mask]
 
         indices = filtered.loc[(filtered['PRIOR_TYPE'] == 'out') & (filtered['NEXT_TYPE'] == 'in'), 'INDEX']
-        mask = df['INDEX'].isin(indices)
-        flag.extend(df.loc[mask, ['ID', 'DATE']].to_dict(orient='records'))
-        df = df[~mask]
+        if not indices.empty:
+            mask = df['INDEX'].isin(indices)
+            flag.extend(df.loc[mask, ['ID', 'DATE']].to_dict(orient='records'))
+            df = df[~mask]
 
     # Flag
     flags.setdefault('for_manual_checking', []).extend(flag)
@@ -1356,7 +1381,7 @@ def combine_comments(timestamp_old: dict[tuple[str, str], str],
             continue
         config = FLAG_CONFIG.get(flag_name)
         if not config:
-            print(f"Warning: No config for flag '{flag_name}'.")
+            print(f'Warning: No config for flag {flag_name}.')
             continue
 
         comment_to_add = config['text']
@@ -1371,19 +1396,19 @@ def combine_comments(timestamp_old: dict[tuple[str, str], str],
 
     # Now, append the timestamp data to every key that has content
     for key in all_keys:
-        flag_part = comments.get(key, "") + '\n'
-        old_ts_part = timestamp_old.get(key, "")
-        new_ts_part = timestamp_new.get(key, "Processed Data:\n[No punches after processing]")
+        flag_part = comments.get(key, '')
+        old_ts_part = timestamp_old.get(key, '')
+        new_ts_part = timestamp_new.get(key, 'Processed Data:\n[No punches after processing]')
 
         # Combine all parts with clear separators
         final_comment_parts = []
         if flag_part:
-            final_comment_parts.append(flag_part)
+            final_comment_parts.append(flag_part + '\n')
         if old_ts_part:
             final_comment_parts.append(old_ts_part)
 
         final_comment_parts.append(new_ts_part)
-        final_comment_parts.append("✨[rs_uy]")
+        final_comment_parts.append('✨[rs_uy]')
 
         comments[key] = '\n'.join(final_comment_parts)
 
@@ -1690,6 +1715,54 @@ def create_sheet(df: pd.DataFrame,
 
     return final_output_path
 
+
+def run_final_sanity_checks(df: pd.DataFrame, flags: dict[str, list],
+                            short_day_thresh: timedelta = timedelta(hours=2),
+                            long_day_thresh: timedelta = timedelta(hours=15),
+                            punch_count_thresh: int = 10) -> pd.DataFrame:
+    """
+    Performs final checks on the cleaned data to flag unusual patterns for a day.
+
+    Args:
+        df: The fully processed DataFrame (before helper columns are dropped).
+        flags: The dictionary for recording issues.
+        short_day_thresh: Any workday shorter than this duration is flagged.
+        long_day_thresh: Any workday longer than this duration is flagged.
+        punch_count_thresh: Any day with more than this many punches is flagged.
+
+    Returns:
+        The DataFrame, passed through without modification.
+    """
+    if df.empty:
+        return df
+
+    daily_summary = df.groupby(['ID', 'DATE'])
+
+    for (employee_id, row_date), group in daily_summary:
+        flag_item = {'ID': employee_id, 'DATE': row_date}
+
+        # Check 1: Excessive punch count
+        if len(group) > punch_count_thresh:
+            flags.setdefault('excessive_punches', []).append(flag_item)
+
+        # Check 2: Imbalanced day (only INs or only OUTs)
+        if group['TYPE'].nunique() == 1:
+            flags.setdefault('imbalanced_day', []).append(flag_item)
+            continue  # Skip duration checks for imbalanced days
+
+        # Check 3 & 4: Workday duration
+        first_punch_time = group['DATETIME'].min()
+        last_punch_time = group['DATETIME'].max()
+        work_duration = last_punch_time - first_punch_time
+
+        if timedelta(seconds=0) < work_duration < short_day_thresh:
+            flags.setdefault('short_duration_day', []).append(flag_item)
+
+        if work_duration > long_day_thresh:
+            flags.setdefault('long_duration_day', []).append(flag_item)
+
+    return df
+
 def process_timesheet(df: pd.DataFrame,
                       buffer: timedelta = timedelta(minutes=15),
                       start_hour: timedelta | None = str_to_delta('07:00 AM'),
@@ -1759,22 +1832,25 @@ def process_timesheet(df: pd.DataFrame,
     # Step 6: Remove duplicates of different punch (in-out or out-in)
     df = remove_diff_type_duplicate(df, buffer)
 
-    # Step 6: In-between verified
+    # Step 7: In-between verified
     df = verify_in_betweens(df, flags)
 
-    # Step 7: In-Out pair verification
+    # Step 8: In-Out pair verification
     df = pair_verification(df, flags)
 
-    # Step 8: Rounding
+    # Step 9: Rounding
     df = adjust_and_round(df, round_to, buffer)
 
-    # Step 9: Insert break time punches
+    # Step 10: Insert break time punches
     df = insert_breaks(df, break_time, flags)
 
-    # Step 10: Flag odd groups
+    # Step 11: Flag odd groups
     df = flag_odd_groups(df, flags)
 
-    # Step 11: Remove helper columns
+    # Step 12: Final sanity check and flag
+    df = run_final_sanity_checks(df, flags)
+
+    # Step 13: Remove helper columns
     df = df.drop(['TIMEDELTA', 'INDEX', 'VERIFIED'], axis='columns')
 
     # create summary
