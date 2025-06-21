@@ -1862,7 +1862,7 @@ def process_timesheet(df: pd.DataFrame,
 
 def run_default():
     # Parameters
-    file_path: Path = Path('sampol.xlsx')
+    file_path: Path = Path('sample.xlsx')
     buffer: timedelta = timedelta(minutes=15)
     start_hour: timedelta = str_to_delta('07:00 AM')
     end_hour: timedelta = str_to_delta('10:00 PM')
