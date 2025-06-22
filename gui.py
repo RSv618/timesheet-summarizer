@@ -4,12 +4,15 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog,
     QLabel, QLineEdit, QGroupBox, QSpinBox, QCheckBox, QComboBox,
     QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox, QTextEdit,
-    QTabWidget, QStyleFactory, QSizePolicy
+    QTabWidget, QStyleFactory, QSizePolicy, QFormLayout, QFrame
 )
 from PyQt6.QtCore import Qt, QPoint
-from PyQt6.QtGui import QFont, QIcon
+from PyQt6.QtGui import QFont, QIcon, QPixmap
 from pathlib import Path
 from datetime import datetime, timedelta
+
+__version__ = "20250622"
+__author__ = "Robert Simon Uy"
 
 try:
     from timesheet import process_timesheet, str_to_delta
@@ -52,15 +55,19 @@ class ConstrainedComboBox(QComboBox):
 class TimesheetApp(QWidget):
     def __init__(self):
         super().__init__()
+        script_dir = Path(__file__).parent
+        self.icon_path = script_dir / 'logo.png'
         self.init_ui()
 
     def init_ui(self):
-        script_dir = Path(__file__).parent
-        icon_path = script_dir / 'logo.ico'
-        if icon_path.exists():
-            self.setWindowIcon(QIcon(str(icon_path)))
+        if self.icon_path.exists():
+            self.setWindowIcon(QIcon(str(self.icon_path)))
         else:
-            print(f"Warning: Icon file not found at '{icon_path}'.")
+            print(f"Warning: Icon file not found at '{self.icon_path}'.")
+
+        # Versioning
+        self.setWindowTitle(f'Timesheet Processor v{__version__}')
+        self.setGeometry(100, 100, 750, 700)
 
         self.setWindowTitle('Timesheet Processor')
         self.setGeometry(100, 100, 750, 700)
@@ -71,10 +78,81 @@ class TimesheetApp(QWidget):
         tabs.addTab(self._create_main_tab(), "Home")
         tabs.addTab(self._create_settings_tab(), "Settings")
         tabs.addTab(self._create_breaks_tab(), "Break Times")
+        tabs.addTab(self._create_about_tab(), "About")
 
         main_layout.addWidget(tabs)
         main_layout.addWidget(self._create_log_box())
         self.show()
+
+    def _create_about_tab(self):
+        about_tab = QWidget()
+        main_layout = QVBoxLayout(about_tab)
+        main_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        main_layout.setContentsMargins(25, 25, 25, 25)
+        main_layout.setSpacing(15)
+
+        # 1. Logo
+        if self.icon_path.exists():
+            logo_label = QLabel()
+            pixmap = QPixmap(str(self.icon_path)).scaled(96, 96, Qt.AspectRatioMode.KeepAspectRatio,
+                                                         Qt.TransformationMode.SmoothTransformation)
+            logo_label.setPixmap(pixmap)
+            logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            main_layout.addWidget(logo_label)
+
+        # 2. Application Title and Description
+        title_label = QLabel("Timesheet Processor")
+        title_font = QFont()
+        title_font.setPointSize(16)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_layout.addWidget(title_label)
+
+        description_label = QLabel("A utility to clean, process, and summarize timesheet data from raw punch logs.")
+        description_label.setWordWrap(True)
+        description_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_layout.addWidget(description_label)
+
+        # 3. Separator Line
+        main_layout.addWidget(self._create_separator())
+
+        # 4. Details Section using QFormLayout
+        details_layout = QFormLayout()
+        # THIS LINE IS NOW REMOVED to keep labels and values on the same line.
+        # details_layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        details_layout.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        details_layout.addRow("Version:", QLabel(f"{__version__}"))
+        details_layout.addRow("Author:", QLabel(f"<b>{__author__}</b>"))
+        details_layout.addRow("License:", QLabel("MIT License"))
+
+        source_code_label = QLabel('<a href="https://github.com/RSv618/timesheet-summarizer">View on GitHub</a>')
+        source_code_label.setOpenExternalLinks(True)
+        details_layout.addRow("Source Code:", source_code_label)
+
+        main_layout.addLayout(details_layout)
+
+        # 5. Separator Line
+        main_layout.addWidget(self._create_separator())
+
+        # 6. "Built With" Section
+        built_with_label = QLabel("Built with Python & PyQt6")
+        built_with_label.setStyleSheet("color: #888;")
+        built_with_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_layout.addWidget(built_with_label)
+
+        main_layout.addStretch()
+
+        return about_tab
+
+    @staticmethod
+    def _create_separator():
+        """Helper function to create a horizontal line."""
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        return line
 
     def _create_settings_tab(self):
         settings_tab = QWidget()
