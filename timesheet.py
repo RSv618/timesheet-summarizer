@@ -5,6 +5,7 @@ from openpyxl.styles import PatternFill, Font, Border, Side, Alignment
 from openpyxl.comments import Comment
 from openpyxl.utils import get_column_letter
 from platform import system
+from typing import Any
 
 # ==============================================================================
 # FLAG CONFIGURATION
@@ -61,17 +62,9 @@ FLAG_CONFIG: dict[str, dict] = {
         'text': 'REVIEW: Punch Type.',
         'crucial': True
     },
-    'early_return_from_break': {
-        'text': 'REVIEW: Clock in before break.',
-        'crucial': True
-    },
-    'post_break_re_punch': {
-        'text': 'REVIEW: Clock out after break.',
-        'crucial': True
-    }
 }
 
-def preprocess_sheet(df_raw: pd.DataFrame) -> pd.DataFrame | None:
+def preprocess_sheet(df_raw: pd.DataFrame) -> pd.DataFrame:
     """
     Takes a raw DataFrame (from one sheet or file) and performs initial processing.
     1. Checks for and standardizes headers.
@@ -848,96 +841,130 @@ def add_helper_cols(df: pd.DataFrame) -> pd.DataFrame:
 def adjust_break_time(df: pd.DataFrame, break_time: dict[str, dict], buffer: timedelta, flags: dict[str, list]) -> pd.DataFrame:
     """
     Adjusts punches around defined break times.
-    - Snaps valid punches to break start/end times.
-    - Removes invalid punches that attempt to bypass break rules.
-    - Flags suspicious patterns like clocking out and in long after a break.
+
+    For unpaid breaks, it snaps late clock-outs to the break start time and
+    early clock-ins to the break end time.
+    For paid breaks, it removes redundant in/out pairs that occur entirely
+    within the break period.
+
+    Args:
+        df: The DataFrame to process.
+        break_time: A dictionary defining break periods, start/end times, and paid status.
+        buffer: A grace period for time comparisons.
+        flags: A dictionary for recording issues (not used in this func but kept for signature consistency).
+
+    Returns:
+        The DataFrame with break time punches adjusted.
     """
-    # Helper columns
+    # Helper column
     df['NORMALIZED'] = df['DATETIME'].dt.normalize()
     df['PRIOR_INDEX'] = df['INDEX'].shift(1)
     df['NEXT_INDEX'] = df['INDEX'].shift(-1)
     to_be_flagged: set = set()
-    indices_to_remove: list[int] = []
 
     for breaktime_name, data in break_time.items():
         start: timedelta = data['start']
         end: timedelta = data['end']
 
-        # --- Detect and flag late re-punching ---
-        short_break_buffer = timedelta(minutes=5)
-        late_repunch_mask = (
-            (df['TYPE'] == 'out') &
-            (df['TYPE'].shift(-1) == 'in') &
-            (df['ID'] == df['ID'].shift(-1)) &
-            (df['TIMEDELTA'] > end) &
-            ((df['DATETIME'].shift(-1) - df['DATETIME']) <= short_break_buffer)
-        )
-        if late_repunch_mask.any():
-            indices_to_flag = df[late_repunch_mask]['INDEX']
-            next_indices_to_flag = df[late_repunch_mask]['NEXT_INDEX']
-            flag_data = df[df['INDEX'].isin(indices_to_flag)][['ID', 'DATE']].to_dict(orient='records')
-            flags.setdefault('post_break_re_punch', []).extend(flag_data)
-            df.loc[df['INDEX'].isin(indices_to_flag), 'VERIFIED'] = True
-            df.loc[df['INDEX'].isin(next_indices_to_flag), 'VERIFIED'] = True
-
-        # --- EXISTING LOGIC, GUARDED BY 'VERIFIED == False' ---
         verified_in: list[int] = []
         verified_out: list[int] = []
 
-        mask = (df['TIMEDELTA'].between(start - buffer, end - buffer, inclusive='left')) & (df['TYPE'] == 'out') & (df['VERIFIED'] == False)
-        if mask.any():
+        # Auto-adjust Late Clock-outs to start of break time
+        indices: pd.Series = df.loc[(df['TIMEDELTA'] >= start - buffer) &
+                                    (df['TIMEDELTA'] < end - buffer) &
+                                    (df['TYPE'] == 'out'), 'INDEX']
+        if not indices.empty:
+            mask: pd.Series = df['INDEX'].isin(indices)
             df.loc[mask, 'VERIFIED'] = True
             df.loc[mask, 'DATETIME'] = df.loc[mask, 'NORMALIZED'] + start
 
-        mask = (df['TIMEDELTA'].between(start + buffer, end + buffer, inclusive='right')) & (df['TYPE'] == 'in') & (df['VERIFIED'] == False)
-        if mask.any():
+        # Auto-adjust Early Clock-ins to end of break time
+        indices = df.loc[(df['TIMEDELTA'] <= end + buffer) &
+                         (df['TIMEDELTA'] > start + buffer) &
+                         (df['TYPE'] == 'in'), 'INDEX']
+        if not indices.empty:
+            mask = df['INDEX'].isin(indices)
             df.loc[mask, 'VERIFIED'] = True
             df.loc[mask, 'DATETIME'] = df.loc[mask, 'NORMALIZED'] + end
 
-        indices = df.loc[df['TIMEDELTA'].between(end - buffer, end + buffer) & (df['TYPE'] == 'out') & (df['VERIFIED'] == False), 'INDEX']
+        # Auto-adjust Late Clock-outs near the end of breaktime.
+        indices = df.loc[(df['TIMEDELTA'] >= end - buffer) &
+                         (df['TIMEDELTA'] <= end + buffer) &
+                         (df['TYPE'] == 'out'), 'INDEX']
         if not indices.empty:
+            verified_in = []
+            verified_out = []
             for i in indices:
                 filtered: pd.DataFrame = df[df['INDEX'] == i]
-                prior_row = df[df['INDEX'] == filtered['PRIOR_INDEX'].iat[0]]
+
+                # check from prior
+                prior_row: pd.DataFrame = df[df['INDEX'] ==  filtered['PRIOR_INDEX'].iat[0]]
                 if not prior_row.empty:
-                    if prior_row['TYPE'].iat[0] == 'out' and prior_row['VERIFIED'].iat[0] and filtered['ID'].iat[0] == prior_row['ID'].iat[0]:
+                    prior_verified: bool = prior_row['VERIFIED'].iat[0]
+                    prior_type: str = prior_row['TYPE'].iat[0]
+                    prior_id: str = prior_row['ID'].iat[0]
+                    if (prior_type == 'out') & (prior_verified == True) & (filtered['ID'].iat[0] == prior_id):
                         verified_in.append(i)
                         continue
-                    elif prior_row['TYPE'].iat[0] == 'in' and prior_row['VERIFIED'].iat[0] and filtered['ID'].iat[0] == prior_row['ID'].iat[0]:
+                    elif (prior_type == 'in') & (prior_verified == True) & (filtered['ID'].iat[0] == prior_id):
                         verified_out.append(i)
+                        to_be_flagged.add(i)
                         continue
-                next_row = df[df['INDEX'] == filtered['NEXT_INDEX'].iat[0]]
+
+                # check from next
+                next_row: pd.DataFrame = df[df['INDEX'] ==  filtered['NEXT_INDEX'].iat[0]]
                 if not next_row.empty:
-                    if next_row['TYPE'].iat[0] == 'in' and next_row['VERIFIED'].iat[0] and filtered['ID'].iat[0] == next_row['ID'].iat[0]:
+                    next_verified: bool = next_row['VERIFIED'].iat[0]
+                    next_type: str = next_row['TYPE'].iat[0]
+                    next_id: str = next_row['ID'].iat[0]
+                    if (next_type == 'in') & (next_verified == True) & (filtered['ID'].iat[0] == next_id):
                         verified_out.append(i)
+                        to_be_flagged.add(i)
                         continue
-                    elif next_row['TYPE'].iat[0] == 'out' and next_row['VERIFIED'].iat[0] and filtered['ID'].iat[0] == next_row['ID'].iat[0]:
+                    elif (next_type == 'out') & (next_verified == True) & (filtered['ID'].iat[0] == next_id):
                         verified_in.append(i)
                         continue
+
+                # cannot be verified
                 to_be_flagged.add(i)
 
-        indices = df.loc[df['TIMEDELTA'].between(start - buffer, start + buffer) & (df['TYPE'] == 'in') & (df['VERIFIED'] == False), 'INDEX']
+        # Auto-adjust Early Clock-ins near the start of breaktime.
+        indices = df.loc[(df['TIMEDELTA'] >= start - buffer) &
+                         (df['TIMEDELTA'] <= start + buffer) &
+                         (df['TYPE'] == 'in'), 'INDEX']
         if not indices.empty:
             for i in indices:
                 filtered = df[df['INDEX'] == i]
+
+                # check from prior
                 prior_row = df[df['INDEX'] == filtered['PRIOR_INDEX'].iat[0]]
                 if not prior_row.empty:
-                    if prior_row['TYPE'].iat[0] == 'out' and prior_row['VERIFIED'].iat[0] and filtered['ID'].iat[0] == prior_row['ID'].iat[0]:
-                        indices_to_remove.append(i)
-                        flag: list = df.loc[df['INDEX'] == i, ['ID', 'DATE']].to_dict(orient='records')
-                        flags.setdefault('early_return_from_break', []).extend(flag)
+                    prior_verified = prior_row['VERIFIED'].iat[0]
+                    prior_type = prior_row['TYPE'].iat[0]
+                    prior_id = prior_row['ID'].iat[0]
+                    if (prior_type == 'out') & (prior_verified == True) & (filtered['ID'].iat[0] == prior_id):
+                        verified_in.append(i)
+                        to_be_flagged.add(i)
                         continue
-                    elif prior_row['TYPE'].iat[0] == 'in' and prior_row['VERIFIED'].iat[0] and filtered['ID'].iat[0] == prior_row['ID'].iat[0]:
+                    elif (prior_type == 'in') & (prior_verified == True) & (filtered['ID'].iat[0] == prior_id):
                         verified_out.append(i)
                         continue
+
+                # check from next
                 next_row = df[df['INDEX'] == filtered['NEXT_INDEX'].iat[0]]
                 if not next_row.empty:
-                    if next_row['TYPE'].iat[0] == 'in' and next_row['VERIFIED'].iat[0] and filtered['ID'].iat[0] == next_row['ID'].iat[0]:
+                    next_verified = next_row['VERIFIED'].iat[0]
+                    next_type = next_row['TYPE'].iat[0]
+                    next_id = next_row['ID'].iat[0]
+                    if (next_type == 'in') & (next_verified == True) & (filtered['ID'].iat[0] == next_id):
                         verified_out.append(i)
                         continue
-                    elif next_row['TYPE'].iat[0] == 'out' and next_row['VERIFIED'].iat[0] and filtered['ID'].iat[0] == next_row['ID'].iat[0]:
+                    elif (next_type == 'out') & (next_verified == True) & (filtered['ID'].iat[0] == next_id):
                         verified_in.append(i)
+                        to_be_flagged.add(i)
                         continue
+
+                # cannot be verified
                 to_be_flagged.add(i)
 
         if len(verified_in) > 0:
@@ -945,37 +972,47 @@ def adjust_break_time(df: pd.DataFrame, break_time: dict[str, dict], buffer: tim
             df.loc[mask, 'TYPE'] = 'in'
             df.loc[mask, 'DATETIME'] = df.loc[mask, 'NORMALIZED'] + end
             df.loc[mask, 'VERIFIED'] = True
+
         if len(verified_out) > 0:
             mask = df['INDEX'].isin(verified_out)
             df.loc[mask, 'TYPE'] = 'out'
             df.loc[mask, 'DATETIME'] = df.loc[mask, 'NORMALIZED'] + start
             df.loc[mask, 'VERIFIED'] = True
 
-    if indices_to_remove:
-        df = df[~df['INDEX'].isin(indices_to_remove)].copy()
-
-    # Re-apply helper columns for paid break logic, as rows may have been removed
+    # Reapply
     df['PRIOR_INDEX'] = df['INDEX'].shift(1)
     df['TIMEDELTA'] = df['DATETIME'] - df['DATETIME'].dt.normalize()
 
+    # Paid breaks
     for breaktime_name, data in break_time.items():
         start = data['start']
         end = data['end']
-        if not data.get('paid', False):
+        paid: bool = data['paid']
+        if not paid:
             continue
-        mask = (df['TIMEDELTA'].between(start - buffer, end + buffer)) & (df['TYPE'] == 'in') & \
-               (df['TIMEDELTA'].shift(1).between(start - buffer, end + buffer)) & (df['TYPE'].shift(1) == 'out') & \
-               (df['ID'] == df['ID'].shift(1))
-        if mask.any():
-            indices_to_nuke = df.loc[mask, ['INDEX', 'PRIOR_INDEX']]
-            df = df[~df['INDEX'].isin(set(indices_to_nuke['INDEX'].tolist() + indices_to_nuke['PRIOR_INDEX'].tolist()))]
 
-        mask = (df['TIMEDELTA'].between(start - buffer, end + buffer)) & (df['TYPE'] == 'in')
-        if mask.any():
+        # Remove out-in punches within paid breaks
+        indices = df.loc[(df['TIMEDELTA'] <= end + buffer) & (df['TIMEDELTA'] >= start - buffer) &
+                         (df['TYPE'] == 'in') &
+                         (df['TIMEDELTA'].shift(1) >= start - buffer) & (df['TIMEDELTA'].shift(1) <= end + buffer) &
+                         (df['TYPE'].shift(1) == 'out') &
+                         (df['ID'] == df['ID'].shift(1)), ['INDEX', 'PRIOR_INDEX']]
+        if not indices.empty:
+            mask = df['INDEX'].isin(set(indices['INDEX'].tolist() + indices['PRIOR_INDEX'].tolist()))
+            df = df[~mask]  # remove rows
+
+        # Adjust clock in punches to the start
+        indices = df.loc[(df['TIMEDELTA'] <= end + buffer) &
+                         (df['TYPE'] == 'in') &
+                         (df['TIMEDELTA'] >= start - buffer), 'INDEX']
+        if not indices.empty:
+            mask = df['INDEX'].isin(indices)
             df.loc[mask, 'DATETIME'] = df.loc[mask, 'NORMALIZED'] + start
 
+    # Remove helper columns
     df = df.drop(['NORMALIZED', 'PRIOR_INDEX', 'NEXT_INDEX'], axis='columns')
 
+    # Flag
     flag: list[dict] = df.loc[df['INDEX'].isin(to_be_flagged), ['ID', 'DATE']].to_dict(orient='records')
     flags.setdefault('check_break_time', []).extend(flag)
     return df
@@ -1415,11 +1452,11 @@ def insert_breaks(df: pd.DataFrame, break_times: dict[str, dict],
             break_start: timedelta = break_data['start']
             break_end: timedelta = break_data['end']
 
-            last_in_row: pd.Series | None = None
+            last_in_row: Any = None
             for idx, row in group.iterrows():
                 if row['TYPE'] == 'in':
                     last_in_row = row
-                elif row['TYPE'] == 'out' and last_in_row is not None:
+                elif row['TYPE'] == 'out' and (last_in_row is not None):
                     # Check if this in-out pair spans the unpunched break
                     if (last_in_row['TIMEDELTA'] < break_start) and (row['TIMEDELTA'] > break_end):
 
@@ -1663,7 +1700,7 @@ def create_sheet(df: pd.DataFrame,
                 col = date_to_col[date_col]
                 cell = worksheet.cell(row=row, column=col)
                 n_lines = len(comment_text.splitlines())
-                cell.comment = Comment(comment_text, '[rs_uy robot]', height=n_lines * 20, width=180)
+                cell.comment = Comment(comment_text, '[rs_uy robot]', height=int(n_lines * 19.3 + 3), width=185)
             else:
                 print(f'Warning: Comment for ({employee_id=}, {date_col=}) not found in DataFrame.')
 
