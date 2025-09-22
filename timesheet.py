@@ -6,6 +6,7 @@ from openpyxl.comments import Comment
 from openpyxl.utils import get_column_letter
 from platform import system
 from typing import Any
+"""pyinstaller --onefile --windowed --add-data "logo.png;." --icon="logo.png" gui.py"""
 
 # ==============================================================================
 # FLAG CONFIGURATION
