@@ -13,6 +13,9 @@ from datetime import datetime, timedelta
 
 __version__ = "20250922"
 __author__ = "Robert Simon Uy"
+"""
+pyinstaller --onefile --windowed --name "TimeSheet" --add-data "logo.png;." --icon="logo.png" gui.py
+"""
 
 try:
     from timesheet import process_timesheet, str_to_delta
