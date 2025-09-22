@@ -11,7 +11,7 @@ from PyQt6.QtGui import QFont, QIcon, QPixmap
 from pathlib import Path
 from datetime import datetime, timedelta
 
-__version__ = "20250920"
+__version__ = "20250922"
 __author__ = "Robert Simon Uy"
 
 try:
